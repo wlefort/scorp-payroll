@@ -1,0 +1,7 @@
+name = "scorp-tracker"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "scorp-payroll-db"
+database_id = "68c07d89-cc92-499e-87c7-6a9813e8a088"
