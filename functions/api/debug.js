@@ -8,5 +8,7 @@ export async function onRequestGet({ env }) {
   return new Response(JSON.stringify({
     CLAUDE_TOKEN: env.CLAUDE_TOKEN ? "SET" : "NOT SET",
     GITHUB_TOKEN: env.GITHUB_TOKEN ? "SET" : "NOT SET",
+    APP_ENV: env.APP_ENV || "NOT SET",
+    keys: Object.keys(env),
   }), { headers: { ...CORS, "Content-Type": "application/json" } });
 }
