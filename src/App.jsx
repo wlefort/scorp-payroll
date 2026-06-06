@@ -198,6 +198,9 @@ export default function App() {
   const initialized = useRef(false);
 
   const [tab, setTab] = useState("monthly");
+  const [recodeDesc, setRecodeDesc] = useState("");
+  const [recodeStatus, setRecodeStatus] = useState(null); // null | "loading" | "done" | "error"
+  const [recodeMsg, setRecodeMsg] = useState("");
   const [flySalaryPct, setFlySalaryPct] = usePersist("sp_flySalaryPct", 35);
   const [salesSalaryPct, setSalesSalaryPct] = usePersist("sp_salesSalaryPct", 40);
   const [taxReservePct, setTaxReservePct] = usePersist("sp_taxReservePct", DEFAULT_TAX_RESERVE_PCT);
@@ -634,6 +637,7 @@ export default function App() {
           <Tab label="MONTHLY"  active={tab === "monthly"}  onClick={() => setTab("monthly")}  color={green}  T={T} />
           <Tab label="YTD"      active={tab === "ytd"}      onClick={() => setTab("ytd")}      color={purple} T={T} />
           <Tab label="SETTINGS" active={tab === "settings"} onClick={() => setTab("settings")} color={yellow} T={T} />
+          <Tab label="AI"       active={tab === "ai"}       onClick={() => setTab("ai")}       color={blue}   T={T} />
         </div>
 
         {/* ── MONTHLY TAB ── */}
@@ -1120,6 +1124,69 @@ export default function App() {
               </div>
               <div style={{ fontSize: 11, color: T.textDim, marginTop: 10, lineHeight: 1.6 }}>
                 IRS requires reasonable annual W-2 wages. Batch flying payrolls but ensure total annual wages are defensible by Dec 31.
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* ── AI TAB ── */}
+        {tab === "ai" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <Card accentColor={blue + "55"} T={T}>
+              <div style={{ fontSize: 11, color: blue, letterSpacing: "0.15em", marginBottom: 8 }}>🤖 AI — MODIFY THIS APP</div>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 16, lineHeight: 1.6 }}>
+                Describe what you want to add or change. Claude will update the code and redeploy automatically (~30s).
+              </div>
+              <textarea
+                value={recodeDesc}
+                onChange={e => setRecodeDesc(e.target.value)}
+                placeholder={"Example: Add a notes section where I can log free-form text for each month"}
+                rows={5}
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }}
+              />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
+                <button
+                  disabled={recodeStatus === "loading" || !recodeDesc.trim()}
+                  onClick={async () => {
+                    setRecodeStatus("loading");
+                    setRecodeMsg("");
+                    try {
+                      const res = await fetch("/api/recode", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ description: recodeDesc }),
+                      });
+                      const data = await res.json();
+                      if (data.ok) {
+                        setRecodeStatus("done");
+                        setRecodeMsg(data.message);
+                        setRecodeDesc("");
+                      } else {
+                        setRecodeStatus("error");
+                        setRecodeMsg(data.error || "Unknown error");
+                      }
+                    } catch (e) {
+                      setRecodeStatus("error");
+                      setRecodeMsg(e.message);
+                    }
+                  }}
+                  style={{ ...btnStyle(blue), opacity: recodeStatus === "loading" ? 0.6 : 1 }}
+                >
+                  {recodeStatus === "loading" ? "⏳ UPDATING..." : "🚀 APPLY CHANGES"}
+                </button>
+                {recodeStatus === "done"  && <span style={{ fontSize: 12, color: A.green }}>✓ {recodeMsg}</span>}
+                {recodeStatus === "error" && <span style={{ fontSize: 12, color: A.red }}>✗ {recodeMsg}</span>}
+              </div>
+            </Card>
+            <Card T={T}>
+              <div style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.15em", marginBottom: 8 }}>HOW IT WORKS</div>
+              <div style={{ fontSize: 12, color: T.textSub, lineHeight: 1.8 }}>
+                1. You describe the change in plain English<br/>
+                2. Claude reads the current app code<br/>
+                3. Claude rewrites the code with your change<br/>
+                4. The update is committed to GitHub<br/>
+                5. Cloudflare redeploys automatically (~30s)<br/>
+                6. Refresh the page to see your change
               </div>
             </Card>
           </div>
