@@ -406,16 +406,19 @@ export default function App() {
   const ytdExpenses   = expenses.filter(e => e.monthKey.startsWith(String(viewYear)) && !e.banked).reduce((s,e) => s+e.amount, 0);
   const ytdGross = ytdFlyGross + ytdSalesGross;
 
-  // Monthly calcs
-  const monthGross = monthFlyGross + monthSalesGross;
-  const monthNetProfit = Math.max(0, monthGross - monthExpTotal);
-  const monthTaxReserve   = Math.round(monthNetProfit * taxReservePct / 100);
-  const monthPayrollBase  = Math.max(0, monthNetProfit - monthTaxReserve);
-  const flyExpShare   = monthGross > 0 ? monthExpTotal * (monthFlyGross / monthGross) : 0;
-  const salesExpShare = monthGross > 0 ? monthExpTotal * (monthSalesGross / monthGross) : 0;
-  const taxFactor = 1 - taxReservePct / 100;
-  const flyP   = calcPayroll(Math.max(0, monthFlyGross - flyExpShare) * taxFactor, flySalaryPct);
-  const salesP = calcPayroll(Math.max(0, monthSalesGross - salesExpShare) * taxFactor, salesSalaryPct);
+  // Monthly calcs — order: gross → tax reserve → expenses → payroll
+  const monthGross        = monthFlyGross + monthSalesGross;
+  const taxFactor         = 1 - taxReservePct / 100;
+  const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
+  const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
+  const monthNetProfit    = Math.max(0, monthAfterTax - monthExpTotal);
+  const monthPayrollBase  = monthNetProfit;
+  const flyAfterTax       = monthFlyGross * taxFactor;
+  const salesAfterTax     = monthSalesGross * taxFactor;
+  const flyExpShare       = monthAfterTax > 0 ? monthExpTotal * (flyAfterTax / monthAfterTax) : 0;
+  const salesExpShare     = monthAfterTax > 0 ? monthExpTotal * (salesAfterTax / monthAfterTax) : 0;
+  const flyP   = calcPayroll(Math.max(0, flyAfterTax - flyExpShare), flySalaryPct);
+  const salesP = calcPayroll(Math.max(0, salesAfterTax - salesExpShare), salesSalaryPct);
   const monthAfterPayroll = flyP.afterPayroll + salesP.afterPayroll;
   const monthDistribution = Math.max(0, monthAfterPayroll);
   const monthNetPaycheck  = flyP.netCheck + salesP.netCheck;
@@ -423,11 +426,14 @@ export default function App() {
 
   // YTD calcs
   const ytdNetProfit    = Math.max(0, ytdGross - ytdExpenses);
-  const ytdTaxReserve   = Math.round(ytdNetProfit * taxReservePct / 100);
-  const ytdFlyExpShare  = ytdGross > 0 ? ytdExpenses * (ytdFlyGross / ytdGross) : 0;
-  const ytdSalesExpShare= ytdGross > 0 ? ytdExpenses * (ytdSalesGross / ytdGross) : 0;
-  const ytdFlyP         = calcPayroll(Math.max(0, ytdFlyGross - ytdFlyExpShare) * taxFactor, flySalaryPct);
-  const ytdSalesP       = calcPayroll(Math.max(0, ytdSalesGross - ytdSalesExpShare) * taxFactor, salesSalaryPct);
+  const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
+  const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
+  const ytdFlyAfterTax  = ytdFlyGross * taxFactor;
+  const ytdSalesAfterTax= ytdSalesGross * taxFactor;
+  const ytdFlyExpShare  = ytdAfterTax > 0 ? ytdExpenses * (ytdFlyAfterTax / ytdAfterTax) : 0;
+  const ytdSalesExpShare= ytdAfterTax > 0 ? ytdExpenses * (ytdSalesAfterTax / ytdAfterTax) : 0;
+  const ytdFlyP         = calcPayroll(Math.max(0, ytdFlyAfterTax - ytdFlyExpShare), flySalaryPct);
+  const ytdSalesP       = calcPayroll(Math.max(0, ytdSalesAfterTax - ytdSalesExpShare), salesSalaryPct);
   const ytdAfterPayroll = ytdFlyP.afterPayroll + ytdSalesP.afterPayroll;
   const ytdDistribution = Math.max(0, ytdAfterPayroll);
   const ytdNetPaycheck  = ytdFlyP.netCheck + ytdSalesP.netCheck;
@@ -445,7 +451,8 @@ export default function App() {
   const ytdWagesPaid = payrollRuns
     .filter(r => r.monthKey && r.monthKey.startsWith(String(viewYear)))
     .reduce((s, r) => s + (r.wage || 0), 0);
-  const w2Ratio  = ytdNetProfit > 0 ? Math.round((ytdWagesPaid / ytdNetProfit) * 100) : 0;
+  const ytdPayrollBase = Math.max(0, ytdAfterTax - ytdExpenses);
+  const w2Ratio  = ytdPayrollBase > 0 ? Math.round((ytdWagesPaid / ytdPayrollBase) * 100) : 0;
   const w2Status = w2Ratio >= 40 ? "SAFE" : w2Ratio >= 28 ? "REVIEW" : "LOW";
 
   // CSV export
@@ -532,11 +539,18 @@ export default function App() {
           </tbody>
         </table>
         <table>
+          <thead><tr><th>TAX RESERVE</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>Tax reserve ({taxReservePct}% of gross)</td><td>-{fmt(monthTaxReserve)}</td></tr>
+            <tr><td>After tax reserve</td><td>{fmt(monthAfterTax)}</td></tr>
+          </tbody>
+        </table>
+        <table>
           <thead><tr><th>EXPENSES</th><th></th></tr></thead>
           <tbody>
             {monthExpenses.map(e => <tr key={e.id}><td>{e.note || "Expense"}</td><td>{fmt(e.amount)}</td></tr>)}
             <tr><td>Total expenses (tax-free)</td><td>{fmt(monthExpTotal)}</td></tr>
-            <tr><td>Taxable base</td><td>{fmt(monthNetProfit)}</td></tr>
+            <tr><td>Payroll base</td><td>{fmt(monthPayrollBase)}</td></tr>
           </tbody>
         </table>
         <table>
@@ -836,12 +850,12 @@ export default function App() {
               <Row label="Flying gross" value={fmt(monthFlyGross)} accent="green" T={T} />
               <Row label="Sales gross" value={fmt(monthSalesGross)} accent="purple" T={T} />
               <Row label="Total gross" value={fmt(monthGross)} bold T={T} />
-              <SectionLabel text="STEP 2 — EXPENSES (TAX-FREE TO YOUR POCKET)" T={T} />
-              <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
-              <Row label="Remaining taxable base" value={fmt(monthNetProfit)} bold accent="yellow" T={T} />
-              <SectionLabel text={`STEP 3 — TAX RESERVE (${taxReservePct}% AUTO-DEDUCTED BEFORE PAYROLL)`} T={T} />
+              <SectionLabel text={`STEP 2 — TAX RESERVE (${taxReservePct}% AUTO-DEDUCTED FIRST)`} T={T} />
               <Row label={`Tax reserve (${taxReservePct}% → reserves account)`} value={`-${fmt(monthTaxReserve)}`} accent="yellow" bold T={T} />
-              <Row label="Payroll base (after tax reserve)" value={fmt(monthPayrollBase)} bold T={T} />
+              <Row label="After tax reserve" value={fmt(monthAfterTax)} bold T={T} />
+              <SectionLabel text="STEP 3 — EXPENSES (TAX-FREE TO YOUR POCKET)" T={T} />
+              <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
+              <Row label="Payroll base" value={fmt(monthPayrollBase)} bold accent="yellow" T={T} />
               <SectionLabel text="STEP 4 — PAYROLL ON PAYROLL BASE" T={T} />
               <Row label={`Flying wages (${flySalaryPct}% of payroll base)`} value={fmt(flyP.wage)} sub T={T} />
               <Row label="Flying employer FICA" value={`-${fmt(flyP.erFICA)}`} sub accent="red" T={T} />
