@@ -16,9 +16,9 @@ export async function onRequestPost({ request, env }) {
     const { description } = await request.json();
     if (!description) return json({ error: "No description provided" }, 400);
 
-    const ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
+    const ANTHROPIC_API_KEY = env.CLAUDE_TOKEN || env.ANTHROPIC_API_KEY;
     const GITHUB_TOKEN      = env.GITHUB_TOKEN;
-    if (!ANTHROPIC_API_KEY) return json({ error: "ANTHROPIC_API_KEY not set" }, 500);
+    if (!ANTHROPIC_API_KEY) return json({ error: "CLAUDE_TOKEN not set" }, 500);
     if (!GITHUB_TOKEN)      return json({ error: "GITHUB_TOKEN not set" }, 500);
 
     // 1. Fetch current App.jsx from GitHub
