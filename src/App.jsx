@@ -271,10 +271,19 @@ export default function App() {
   function addFlyJob() {
     const amt = parseFloat(flyInput);
     if (isNaN(amt) || amt <= 0) return;
-    setFlyJobs(prev => [...prev, { id: Date.now(), amount: amt, note: flyNote, monthKey: getMonthKey(new Date()) }]);
+    setFlyJobs(prev => [...prev, { id: Date.now(), amount: amt, note: flyNote, monthKey: getMonthKey(new Date()), received: false }]);
     setFlyInput(""); setFlyNote("");
   }
   function removeFlyJob(id) { setFlyJobs(prev => prev.filter(j => j.id !== id)); }
+  // Mark an invoiced flying job as received — money landed in the business account, bank
+  // auto-withholds the tax reserve %, so mirror that deposit immediately (not at payroll run time).
+  function markFlyJobReceived(id) {
+    const job = flyJobs.find(j => j.id === id);
+    if (!job || job.received) return;
+    const taxAmt = Math.round(job.amount * taxReservePct / 100);
+    setFlyJobs(prev => prev.map(j => j.id === id ? { ...j, received: true, taxReserved: taxAmt, receivedDate: new Date().toISOString() } : j));
+    addReserveDeposit(taxAmt, `Auto — Flying job received (${taxReservePct}% of ${fmt(job.amount)})`);
+  }
 
   function addSales() {
     const amt = parseFloat(salesInput);
@@ -299,7 +308,7 @@ export default function App() {
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
   // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
-  const totalFlyJobsGross  = flyJobs.reduce((s, j) => s + j.amount, 0);
+  const totalFlyJobsGross  = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + j.amount, 0);
   const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
   const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
@@ -325,11 +334,15 @@ export default function App() {
   }
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
-  // Payroll run log — one combined run covering flying balance + this month's sales
+  // Payroll run log — one combined run covering flying balance + this month's sales.
+  // Flying's tax reserve was already pulled (and deposited) when each job was marked
+  // received, so only the sales portion gets a fresh tax deduction here.
   function markPayrollRun() {
     const combinedGross = flyingBalance + monthSalesGross;
-    const taxAmt = Math.round(combinedGross * taxReservePct / 100);
-    const payBase = combinedGross - taxAmt;
+    const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
+    const salesTaxAmt = Math.round(monthSalesGross * taxReservePct / 100);
+    const salesNet = monthSalesGross - salesTaxAmt;
+    const payBase = flyingNet + salesNet;
     const runP = calcPayroll(payBase, salaryPct);
     const run = {
       id: Date.now(),
@@ -339,7 +352,7 @@ export default function App() {
       gross: combinedGross,
       flyGrossUsed: flyingBalance,
       salesGrossUsed: monthSalesGross,
-      taxReserve: taxAmt,
+      taxReserve: salesTaxAmt,
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
@@ -349,7 +362,7 @@ export default function App() {
       note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
-    addReserveDeposit(taxAmt, `Auto — Payroll run (${taxReservePct}% of ${fmt(combinedGross)})`);
+    if (salesTaxAmt > 0) addReserveDeposit(salesTaxAmt, `Auto — Payroll run, sales portion (${taxReservePct}% of ${fmt(monthSalesGross)})`);
     setRunNote("");
   }
   function removePayrollRun(id) { setPayrollRuns(prev => prev.filter(r => r.id !== id)); }
@@ -388,8 +401,11 @@ export default function App() {
   const monthExpensePayout = expensePayouts.find(p => p.monthKey === viewKey);
 
   // Month data
-  const monthFlyJobs = flyJobs.filter(j => j.monthKey === viewKey);
+  const monthFlyJobsAll = flyJobs.filter(j => j.monthKey === viewKey);
+  const monthFlyJobs = monthFlyJobsAll.filter(j => j.received !== false);
+  const monthFlyJobsPending = monthFlyJobsAll.filter(j => j.received === false);
   const monthFlyGross = monthFlyJobs.reduce((s, j) => s + j.amount, 0);
+  const monthFlyPendingGross = monthFlyJobsPending.reduce((s, j) => s + j.amount, 0);
   const monthSalesEntry = salesEntries.find(e => e.monthKey === viewKey);
   const monthSalesGross = monthSalesEntry ? monthSalesEntry.amount : 0;
   const monthExpenses = expenses.filter(e => e.monthKey === viewKey);
@@ -399,7 +415,7 @@ export default function App() {
   const monthBankedTotal = monthBankedExp.reduce((s, e) => s + e.amount, 0);
 
   // YTD data
-  const ytdFlyGross   = flyJobs.filter(j => j.monthKey.startsWith(String(viewYear))).reduce((s,j) => s+j.amount, 0);
+  const ytdFlyGross   = flyJobs.filter(j => j.monthKey.startsWith(String(viewYear)) && j.received !== false).reduce((s,j) => s+j.amount, 0);
   const ytdSalesGross = salesEntries.filter(e => e.monthKey.startsWith(String(viewYear))).reduce((s,e) => s+e.amount, 0);
   const ytdExpenses   = expenses.filter(e => e.monthKey.startsWith(String(viewYear)) && !e.banked).reduce((s,e) => s+e.amount, 0);
   const ytdGross = ytdFlyGross + ytdSalesGross;
@@ -647,22 +663,41 @@ export default function App() {
                 <input type="text" value={flyNote} onChange={e => setFlyNote(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, flex: "2 1 150px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
                 <button onClick={addFlyJob} style={btnStyle(green)}>+ ADD</button>
               </div>
-              {monthFlyJobs.length === 0
+              {monthFlyJobsAll.length === 0
                 ? <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "12px 0" }}>No flying jobs logged this month</div>
-                : monthFlyJobs.map(j => (
-                  <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}` }}>
-                    <span style={{ fontSize: 12, color: T.textMuted }}>{j.note || "Flying job"}</span>
-                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: green }}>{fmt(j.amount)}</span>
-                      <button onClick={() => removeFlyJob(j.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+                : monthFlyJobsAll.map(j => {
+                  const isPending = j.received === false;
+                  return (
+                    <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}`, opacity: isPending ? 0.7 : 1 }}>
+                      <div>
+                        <span style={{ fontSize: 12, color: T.textMuted }}>{j.note || "Flying job"}</span>
+                        {isPending && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED</span>}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: isPending ? T.textDim : green }}>{fmt(j.amount)}</span>
+                        {isPending && (
+                          <button onClick={() => markFlyJobReceived(j.id)} title="Mark as received in business account — auto-reserves tax" style={{ background: green + "22", border: `1px solid ${green}`, borderRadius: 6, color: green, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                            ✓ RECEIVED
+                          </button>
+                        )}
+                        <button onClick={() => removeFlyJob(j.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               }
-              {monthFlyJobs.length > 0 && (
-                <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 10 }}>
-                  <span style={{ fontSize: 12, color: T.textMuted }}>{monthFlyJobs.length} job{monthFlyJobs.length !== 1 ? "s" : ""} total</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: green }}>{fmt(monthFlyGross)}</span>
+              {monthFlyJobsAll.length > 0 && (
+                <div style={{ paddingTop: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 12, color: T.textMuted }}>{monthFlyJobs.length} received</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: green }}>{fmt(monthFlyGross)}</span>
+                  </div>
+                  {monthFlyJobsPending.length > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+                      <span style={{ fontSize: 12, color: yellow }}>{monthFlyJobsPending.length} pending (invoiced, not yet received)</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: yellow }}>{fmt(monthFlyPendingGross)}</span>
+                    </div>
+                  )}
                 </div>
               )}
             </Card>
@@ -696,9 +731,10 @@ export default function App() {
                   <span style={{ fontSize: 10, color: green, border: `1px solid ${green}`, borderRadius: 4, padding: "2px 8px" }}>✓ RUN LOGGED THIS MONTH</span>
                 )}
               </div>
-              <Row label="Flying balance" value={fmt(flyingBalance)} accent="green" T={T} />
+              <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
               <Row label="This month's sales" value={fmt(monthSalesGross)} accent="purple" T={T} />
               <Row label="Combined gross" value={fmt(flyingBalance + monthSalesGross)} bold T={T} />
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
               {payrollReady ? (
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
