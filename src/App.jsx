@@ -296,10 +296,11 @@ export default function App() {
   function toggleBanked(id) { setExpenses(prev => prev.map(e => e.id === id ? { ...e, banked: !e.banked } : e)); }
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
-  // Cumulative flying balance — all jobs ever minus all runs ever
+  // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
   const totalFlyJobsGross  = flyJobs.reduce((s, j) => s + j.amount, 0);
   const totalFlyRunsGross  = payrollRuns.filter(r => r.type === "flying").reduce((s, r) => s + (r.gross || 0), 0);
-  const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross);
+  const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
+  const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -377,17 +378,30 @@ export default function App() {
   const payrollReady      = flyingBalance >= PAYROLL_THRESHOLD;
 
   // Expense-only payout (skip payroll)
-  function logExpensePayout(action) {
+  function logExpensePayout(action, taxAccount) {
     // action: "hold" = keep remaining in corp, "distribute" = take it all out
+    // taxAccount: "business" (bank auto-withholds 15%) or "personal" (no withholding) — only matters for "distribute"
+    const remaining = Math.max(0, monthGross - monthExpTotal);
+    const flyShare = monthGross > 0 ? monthFlyGross / monthGross : 0;
+    const flyGrossTaken = action === "distribute" ? monthGross * flyShare : monthExpTotal * flyShare;
+    const taxReserveAmt = (action === "distribute" && taxAccount === "business")
+      ? Math.round(remaining * taxReservePct / 100)
+      : 0;
     setExpensePayouts(prev => [...prev, {
       id: Date.now(),
       date: new Date().toISOString(),
       monthKey: viewKey,
       expenseAmount: monthExpTotal,
       grossAmount: monthGross,
-      remainingAmount: Math.max(0, monthGross - monthExpTotal),
+      remainingAmount: remaining,
+      flyGrossTaken: Math.round(flyGrossTaken),
       action,
+      taxAccount: action === "distribute" ? taxAccount : null,
+      taxReserveAmt,
     }]);
+    if (taxReserveAmt > 0) {
+      addReserveDeposit(taxReserveAmt, `Auto — Expense reimbursement distribution to business acct (${taxReservePct}% of ${fmt(remaining)})`);
+    }
   }
   function removeExpensePayout(id) { setExpensePayouts(prev => prev.filter(p => p.id !== id)); }
   const monthExpensePayout = expensePayouts.find(p => p.monthKey === viewKey);
@@ -811,13 +825,17 @@ export default function App() {
                       <button onClick={() => logExpensePayout("hold")} style={{ ...btnStyle(blue), flex: 1 }}>
                         🏦 HOLD IN CORP
                       </button>
-                      <button onClick={() => logExpensePayout("distribute")} style={{ ...btnStyle(purple), flex: 1 }}>
-                        💰 TAKE IT ALL OUT
+                      <button onClick={() => logExpensePayout("distribute", "business")} style={{ ...btnStyle(purple), flex: 1 }}>
+                        💰 TAKE OUT → BUSINESS ACCT
+                      </button>
+                      <button onClick={() => logExpensePayout("distribute", "personal")} style={{ ...btnStyle(yellow), flex: 1 }}>
+                        💸 TAKE OUT → PERSONAL ACCT
                       </button>
                     </div>
                     <div style={{ fontSize: 10, color: T.textDim, marginTop: 8, lineHeight: 1.5 }}>
                       Hold: keep {fmt(Math.max(0, monthGross - monthExpTotal))} toward next payroll threshold.{"  "}
-                      Take: pull the full {fmt(monthGross)} out — {fmt(monthExpTotal)} tax-free expenses + {fmt(Math.max(0, monthGross - monthExpTotal))} as distribution.
+                      Business acct: pulls the full {fmt(monthGross)} out and auto-reserves {taxReservePct}% of {fmt(Math.max(0, monthGross - monthExpTotal))} for taxes (bank withholds it).{"  "}
+                      Personal acct: pulls the full {fmt(monthGross)} out with no tax reserve set aside — you'll need to handle that yourself.
                     </div>
                   </>
                 ) : (
@@ -835,9 +853,16 @@ export default function App() {
                             🏦 {fmt(monthExpensePayout.remainingAmount)} held in corp for next payroll
                           </div>
                         ) : (
-                          <div style={{ fontSize: 11, color: purple }}>
-                            💰 {fmt(monthExpensePayout.remainingAmount)} taken as distribution
-                          </div>
+                          <>
+                            <div style={{ fontSize: 11, color: purple }}>
+                              {monthExpensePayout.taxAccount === "business" ? "💰" : "💸"} {fmt(monthExpensePayout.remainingAmount)} taken as distribution → {monthExpensePayout.taxAccount === "business" ? "business acct" : "personal acct"}
+                            </div>
+                            {monthExpensePayout.taxReserveAmt > 0 && (
+                              <div style={{ fontSize: 11, color: yellow, marginTop: 2 }}>
+                                🏦 +{fmt(monthExpensePayout.taxReserveAmt)} reserved to Tax Reserves Account
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                       <button onClick={() => removeExpensePayout(monthExpensePayout.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
