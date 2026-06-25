@@ -28,8 +28,11 @@ export async function onRequestPost({ request, env }) {
     );
     if (!ghRes.ok) return json({ error: `GitHub read failed: ${ghRes.status}` }, 500);
     const ghData = await ghRes.json();
-    const currentCode = atob(ghData.content.replace(/\n/g, ""));
+    // decodeURIComponent(escape(...)) mirrors the encode side below — atob() alone
+    // mangles multi-byte UTF-8 chars (em dashes, emoji) into garbage.
+    const currentCode = decodeURIComponent(escape(atob(ghData.content.replace(/\n/g, ""))));
     const sha = ghData.sha;
+    const originalLineCount = currentCode.split("\n").length;
 
     // 2. Call Claude to modify the code
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
@@ -41,11 +44,12 @@ export async function onRequestPost({ request, env }) {
       },
       body: JSON.stringify({
         model: "claude-opus-4-5",
-        max_tokens: 8192,
+        max_tokens: 16000,
         messages: [{
           role: "user",
           content: `You are modifying a React single-file app (src/App.jsx).
 Return ONLY the complete updated JSX file with no explanation, no markdown, no code fences — just raw JSX code starting with the import statement.
+You MUST return the ENTIRE file, including all unrelated parts unchanged — never truncate or summarize sections.
 
 USER REQUEST:
 ${description}
@@ -65,6 +69,15 @@ ${currentCode}`
     const newCode = claudeData.content?.[0]?.text?.trim();
     if (!newCode || !newCode.startsWith("import")) {
       return json({ error: "Claude returned unexpected output — no changes made" }, 500);
+    }
+
+    // Safety check: reject obviously truncated/corrupted output rather than bricking the live app
+    const newLineCount = newCode.split("\n").length;
+    if (newLineCount < originalLineCount * 0.7) {
+      return json({ error: `Refused to apply — output looked truncated (${newLineCount} lines vs ${originalLineCount} original). No changes made.` }, 500);
+    }
+    if (!newCode.trimEnd().endsWith("}")) {
+      return json({ error: "Refused to apply — output didn't end with a closing brace, likely truncated. No changes made." }, 500);
     }
 
     // 3. Commit updated file back to GitHub
