@@ -201,8 +201,12 @@ export default function App() {
   const [recodeDesc, setRecodeDesc] = useState("");
   const [recodeStatus, setRecodeStatus] = useState(null); // null | "loading" | "done" | "error"
   const [recodeMsg, setRecodeMsg] = useState("");
-  const [flySalaryPct, setFlySalaryPct] = usePersist("sp_flySalaryPct", 35);
-  const [salesSalaryPct, setSalesSalaryPct] = usePersist("sp_salesSalaryPct", 40);
+  const flySalaryPctLegacy   = ls("sp_flySalaryPct", null);
+  const salesSalaryPctLegacy = ls("sp_salesSalaryPct", null);
+  const salaryPctDefault = (flySalaryPctLegacy != null && salesSalaryPctLegacy != null)
+    ? Math.round((flySalaryPctLegacy + salesSalaryPctLegacy) / 2)
+    : 38;
+  const [salaryPct, setSalaryPct] = usePersist("sp_salaryPct", salaryPctDefault);
   const [taxReservePct, setTaxReservePct] = usePersist("sp_taxReservePct", DEFAULT_TAX_RESERVE_PCT);
   const [flyJobs, setFlyJobs] = usePersist("sp_flyJobs", []);
   const [flyInput, setFlyInput] = useState("");
@@ -217,8 +221,7 @@ export default function App() {
   const [expensePayouts, setExpensePayouts] = usePersist("sp_expensePayouts", []);
   const [healthPremium, setHealthPremium] = usePersist("sp_healthPremium", 0);
   const [reserveEvents, setReserveEvents] = usePersist("sp_reserveEvents", []);
-  const [flyRunNote, setFlyRunNote] = useState("");
-  const [salesRunNote, setSalesRunNote] = useState("");
+  const [runNote, setRunNote] = useState("");
   const [reserveCorrectionInput, setReserveCorrectionInput] = useState("");
   const [reserveWithdrawInput, setReserveWithdrawInput] = useState("");
   const [reserveNoteInput, setReserveNoteInput] = useState("");
@@ -234,8 +237,7 @@ export default function App() {
           if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
           if (data.payrollRuns)    { setPayrollRuns(data.payrollRuns);       localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns)); }
           if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
-          if (data.flySalaryPct   !== undefined) { setFlySalaryPct(data.flySalaryPct);       localStorage.setItem("sp_flySalaryPct", JSON.stringify(data.flySalaryPct)); }
-          if (data.salesSalaryPct !== undefined) { setSalesSalaryPct(data.salesSalaryPct); localStorage.setItem("sp_salesSalaryPct", JSON.stringify(data.salesSalaryPct)); }
+          if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
           if (data.healthPremium  !== undefined) { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
           if (data.reserveEvents)                { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
@@ -254,13 +256,13 @@ export default function App() {
       fetch(SYNC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, flySalaryPct, salesSalaryPct, taxReservePct, healthPremium, reserveEvents }),
+        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents }),
       })
         .then(r => r.ok ? setSyncStatus("synced") : setSyncStatus("error"))
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, flySalaryPct, salesSalaryPct, taxReservePct, healthPremium, reserveEvents]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents]);
 
   const [viewMonth, setViewMonth] = useState(currentMonth);
   const [viewYear, setViewYear] = useState(currentYear);
@@ -298,7 +300,7 @@ export default function App() {
 
   // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
   const totalFlyJobsGross  = flyJobs.reduce((s, j) => s + j.amount, 0);
-  const totalFlyRunsGross  = payrollRuns.filter(r => r.type === "flying").reduce((s, r) => s + (r.gross || 0), 0);
+  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
   const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
@@ -323,17 +325,20 @@ export default function App() {
   }
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
-  // Payroll run log
-  function markFlyPayrollRun() {
-    const taxAmt = Math.round(flyingBalance * taxReservePct / 100);
-    const payBase = flyingBalance - taxAmt;
-    const runP = calcPayroll(payBase, flySalaryPct);
+  // Payroll run log — one combined run covering flying balance + this month's sales
+  function markPayrollRun() {
+    const combinedGross = flyingBalance + monthSalesGross;
+    const taxAmt = Math.round(combinedGross * taxReservePct / 100);
+    const payBase = combinedGross - taxAmt;
+    const runP = calcPayroll(payBase, salaryPct);
     const run = {
       id: Date.now(),
-      type: "flying",
+      type: "combined",
       date: new Date().toISOString(),
       monthKey: viewKey,
-      gross: flyingBalance,
+      gross: combinedGross,
+      flyGrossUsed: flyingBalance,
+      salesGrossUsed: monthSalesGross,
       taxReserve: taxAmt,
       wage: runP.wage,
       netCheck: runP.netCheck,
@@ -341,40 +346,16 @@ export default function App() {
       eeFICA: runP.eeFICA,
       fedWH: runP.fedWH,
       scWH: runP.scWH,
-      note: flyRunNote,
+      note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
-    addReserveDeposit(taxAmt, `Auto — Flying payroll (${taxReservePct}% of ${fmt(flyingBalance)})`);
-    setFlyRunNote("");
-  }
-  function markSalesPayrollRun() {
-    const taxAmt = Math.round(monthSalesGross * taxReservePct / 100);
-    const payBase = monthSalesGross - taxAmt;
-    const tmpP = calcPayroll(payBase, salesSalaryPct);
-    const run = {
-      id: Date.now(),
-      type: "sales",
-      date: new Date().toISOString(),
-      monthKey: viewKey,
-      gross: monthSalesGross,
-      taxReserve: taxAmt,
-      wage: tmpP.wage,
-      netCheck: tmpP.netCheck,
-      erFICA: tmpP.erFICA,
-      eeFICA: tmpP.eeFICA,
-      fedWH: tmpP.fedWH,
-      scWH: tmpP.scWH,
-      note: salesRunNote,
-    };
-    setPayrollRuns(prev => [...prev, run]);
-    addReserveDeposit(taxAmt, `Auto — Sales payroll (${taxReservePct}% of ${fmt(monthSalesGross)})`);
-    setSalesRunNote("");
+    addReserveDeposit(taxAmt, `Auto — Payroll run (${taxReservePct}% of ${fmt(combinedGross)})`);
+    setRunNote("");
   }
   function removePayrollRun(id) { setPayrollRuns(prev => prev.filter(r => r.id !== id)); }
 
   const monthPayrollRuns  = payrollRuns.filter(r => r.monthKey === viewKey);
-  const flyRunThisMonth   = monthPayrollRuns.some(r => r.type === "flying");
-  const salesRunThisMonth = monthPayrollRuns.some(r => r.type === "sales");
+  const runThisMonth      = monthPayrollRuns.length > 0;
   const payrollReady      = flyingBalance >= PAYROLL_THRESHOLD;
 
   // Expense-only payout (skip payroll)
@@ -423,37 +404,28 @@ export default function App() {
   const ytdExpenses   = expenses.filter(e => e.monthKey.startsWith(String(viewYear)) && !e.banked).reduce((s,e) => s+e.amount, 0);
   const ytdGross = ytdFlyGross + ytdSalesGross;
 
-  // Monthly calcs — order: gross → tax reserve → expenses → payroll
+  // Monthly calcs — order: gross → tax reserve → expenses → payroll (one combined run)
   const monthGross        = monthFlyGross + monthSalesGross;
   const taxFactor         = 1 - taxReservePct / 100;
   const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
   const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
   const monthNetProfit    = Math.max(0, monthAfterTax - monthExpTotal);
   const monthPayrollBase  = monthNetProfit;
-  const flyAfterTax       = monthFlyGross * taxFactor;
-  const salesAfterTax     = monthSalesGross * taxFactor;
-  const flyExpShare       = monthAfterTax > 0 ? monthExpTotal * (flyAfterTax / monthAfterTax) : 0;
-  const salesExpShare     = monthAfterTax > 0 ? monthExpTotal * (salesAfterTax / monthAfterTax) : 0;
-  const flyP   = calcPayroll(Math.max(0, flyAfterTax - flyExpShare), flySalaryPct);
-  const salesP = calcPayroll(Math.max(0, salesAfterTax - salesExpShare), salesSalaryPct);
-  const monthAfterPayroll = flyP.afterPayroll + salesP.afterPayroll;
+  const monthP             = calcPayroll(monthPayrollBase, salaryPct);
+  const monthAfterPayroll = monthP.afterPayroll;
   const monthDistribution = Math.max(0, monthAfterPayroll);
-  const monthNetPaycheck  = flyP.netCheck + salesP.netCheck;
+  const monthNetPaycheck  = monthP.netCheck;
   const monthTakeHome     = monthNetPaycheck + monthDistribution;
 
   // YTD calcs
   const ytdNetProfit    = Math.max(0, ytdGross - ytdExpenses);
   const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
   const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
-  const ytdFlyAfterTax  = ytdFlyGross * taxFactor;
-  const ytdSalesAfterTax= ytdSalesGross * taxFactor;
-  const ytdFlyExpShare  = ytdAfterTax > 0 ? ytdExpenses * (ytdFlyAfterTax / ytdAfterTax) : 0;
-  const ytdSalesExpShare= ytdAfterTax > 0 ? ytdExpenses * (ytdSalesAfterTax / ytdAfterTax) : 0;
-  const ytdFlyP         = calcPayroll(Math.max(0, ytdFlyAfterTax - ytdFlyExpShare), flySalaryPct);
-  const ytdSalesP       = calcPayroll(Math.max(0, ytdSalesAfterTax - ytdSalesExpShare), salesSalaryPct);
-  const ytdAfterPayroll = ytdFlyP.afterPayroll + ytdSalesP.afterPayroll;
+  const ytdPayrollBase  = Math.max(0, ytdAfterTax - ytdExpenses);
+  const ytdP            = calcPayroll(ytdPayrollBase, salaryPct);
+  const ytdAfterPayroll = ytdP.afterPayroll;
   const ytdDistribution = Math.max(0, ytdAfterPayroll);
-  const ytdNetPaycheck  = ytdFlyP.netCheck + ytdSalesP.netCheck;
+  const ytdNetPaycheck  = ytdP.netCheck;
   const ytdTakeHome     = ytdNetPaycheck + ytdDistribution;
 
   // YTD projections (only meaningful for current year)
@@ -468,7 +440,6 @@ export default function App() {
   const ytdWagesPaid = payrollRuns
     .filter(r => r.monthKey && r.monthKey.startsWith(String(viewYear)))
     .reduce((s, r) => s + (r.wage || 0), 0);
-  const ytdPayrollBase = Math.max(0, ytdAfterTax - ytdExpenses);
   const w2Ratio  = ytdPayrollBase > 0 ? Math.round((ytdWagesPaid / ytdPayrollBase) * 100) : 0;
   const w2Status = w2Ratio >= 40 ? "SAFE" : w2Ratio >= 28 ? "REVIEW" : "LOW";
 
@@ -573,12 +544,9 @@ export default function App() {
         <table>
           <thead><tr><th>PAYROLL</th><th></th></tr></thead>
           <tbody>
-            <tr><td>Flying wages ({flySalaryPct}%)</td><td>{fmt(flyP.wage)}</td></tr>
-            <tr><td>Flying er FICA</td><td>-{fmt(flyP.erFICA)}</td></tr>
-            <tr><td>Flying net paycheck</td><td>{fmt(flyP.netCheck)}</td></tr>
-            <tr><td>Sales wages ({salesSalaryPct}%)</td><td>{fmt(salesP.wage)}</td></tr>
-            <tr><td>Sales er FICA</td><td>-{fmt(salesP.erFICA)}</td></tr>
-            <tr><td>Sales net paycheck</td><td>{fmt(salesP.netCheck)}</td></tr>
+            <tr><td>Wages ({salaryPct}% of payroll base)</td><td>{fmt(monthP.wage)}</td></tr>
+            <tr><td>Employer FICA</td><td>-{fmt(monthP.erFICA)}</td></tr>
+            <tr><td>Net paycheck</td><td>{fmt(monthP.netCheck)}</td></tr>
           </tbody>
         </table>
         <table>
@@ -600,7 +568,7 @@ export default function App() {
             <tbody>
               {monthPayrollRuns.map(r => (
                 <tr key={r.id}>
-                  <td>{r.type === "flying" ? "✈ Flying" : "💼 Sales"}</td>
+                  <td>💵 Payroll run</td>
                   <td>{fmtDate(r.date)}</td>
                   <td>{fmt(r.netCheck)}</td>
                 </tr>
@@ -662,9 +630,6 @@ export default function App() {
             <Card accentColor={green + "44"} T={T}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <span style={{ fontSize: 11, color: green, letterSpacing: "0.15em" }}>✈️ FLYING JOBS</span>
-                {flyRunThisMonth && (
-                  <span style={{ fontSize: 10, color: green, border: `1px solid ${green}`, borderRadius: 4, padding: "2px 8px" }}>✓ PAYROLL RUN</span>
-                )}
               </div>
               {/* Cumulative balance tracker */}
               <div style={{ marginBottom: 12 }}>
@@ -677,12 +642,6 @@ export default function App() {
                 </div>
                 {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>Need {fmt(PAYROLL_THRESHOLD - flyingBalance)} more to run payroll</div>}
               </div>
-              {payrollReady && !flyRunThisMonth && (
-                <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-                  <input type="text" value={flyRunNote} onChange={e => setFlyRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markFlyPayrollRun()} />
-                  <button onClick={markFlyPayrollRun} style={btnStyle(green)}>✓ MARK RUN · {fmt(flyingBalance)}</button>
-                </div>
-              )}
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <input type="number" value={flyInput} onChange={e => setFlyInput(e.target.value)} placeholder="Job amount ($)" style={{ ...inputStyle, flex: "1 1 120px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
                 <input type="text" value={flyNote} onChange={e => setFlyNote(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, flex: "2 1 150px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
@@ -712,12 +671,6 @@ export default function App() {
             <Card accentColor={purple + "44"} T={T}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                 <span style={{ fontSize: 11, color: purple, letterSpacing: "0.15em" }}>💼 SALES PAYOUT — {MONTHS[viewMonth]} 10th</span>
-                {monthSalesEntry && !salesRunThisMonth && (
-                  <button onClick={markSalesPayrollRun} style={{ ...btnStyle(purple), padding: "2px 10px", fontSize: 10 }}>✓ MARK RUN · {fmt(monthSalesGross)}</button>
-                )}
-                {salesRunThisMonth && (
-                  <span style={{ fontSize: 10, color: purple, border: `1px solid ${purple}`, borderRadius: 4, padding: "2px 8px" }}>✓ PAYROLL RUN</span>
-                )}
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 <input type="number" value={salesInput} onChange={e => setSalesInput(e.target.value)} placeholder={monthSalesEntry ? `Current: ${fmt(monthSalesEntry.amount)}` : "Monthly payout ($)"} style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && addSales()} />
@@ -725,9 +678,6 @@ export default function App() {
                 {monthSalesEntry && <button onClick={() => setSalesEntries(prev => prev.filter(e => e.monthKey !== viewKey))} style={btnStyle(A.red)}>RESET</button>}
               </div>
               <input type="text" value={salesNoteInput} onChange={e => setSalesNoteInput(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, marginBottom: 4 }} onKeyDown={e => e.key === "Enter" && addSales()} />
-              {monthSalesEntry && !salesRunThisMonth && (
-                <input type="text" value={salesRunNote} onChange={e => setSalesRunNote(e.target.value)} placeholder="Payroll run note (e.g. Gusto batch #5)" style={{ ...inputStyle, marginBottom: 4, borderColor: purple + "66" }} />
-              )}
               {monthSalesEntry && (
                 <div style={{ padding: "8px 0" }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -735,6 +685,27 @@ export default function App() {
                     <span style={{ fontSize: 14, fontWeight: 700, color: purple }}>{fmt(monthSalesEntry.amount)}</span>
                   </div>
                 </div>
+              )}
+            </Card>
+
+            {/* Unified Payroll Run */}
+            <Card accentColor={green + "44"} T={T}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontSize: 11, color: green, letterSpacing: "0.15em" }}>💵 PAYROLL RUN</span>
+                {runThisMonth && (
+                  <span style={{ fontSize: 10, color: green, border: `1px solid ${green}`, borderRadius: 4, padding: "2px 8px" }}>✓ RUN LOGGED THIS MONTH</span>
+                )}
+              </div>
+              <Row label="Flying balance" value={fmt(flyingBalance)} accent="green" T={T} />
+              <Row label="This month's sales" value={fmt(monthSalesGross)} accent="purple" T={T} />
+              <Row label="Combined gross" value={fmt(flyingBalance + monthSalesGross)} bold T={T} />
+              {payrollReady ? (
+                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                  <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
+                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + monthSalesGross)}</button>
+                </div>
+              ) : (
+                <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>Waiting on flying balance to hit {fmt(PAYROLL_THRESHOLD)} before running payroll</div>
               )}
             </Card>
 
@@ -885,15 +856,11 @@ export default function App() {
               <SectionLabel text="STEP 3 — EXPENSES (TAX-FREE TO YOUR POCKET)" T={T} />
               <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
               <Row label="Payroll base" value={fmt(monthPayrollBase)} bold accent="yellow" T={T} />
-              <SectionLabel text="STEP 4 — PAYROLL ON PAYROLL BASE" T={T} />
-              <Row label={`Flying wages (${flySalaryPct}% of payroll base)`} value={fmt(flyP.wage)} sub T={T} />
-              <Row label="Flying employer FICA" value={`-${fmt(flyP.erFICA)}`} sub accent="red" T={T} />
-              <Row label={`Sales wages (${salesSalaryPct}% of payroll base)`} value={fmt(salesP.wage)} sub T={T} />
-              <Row label="Sales employer FICA" value={`-${fmt(salesP.erFICA)}`} sub accent="red" T={T} />
-              <SectionLabel text="YOUR PAYCHECKS (AFTER WITHHOLDING)" T={T} />
-              <Row label="Flying net paycheck" value={fmt(flyP.netCheck)} accent="green" T={T} />
-              <Row label="Sales net paycheck" value={fmt(salesP.netCheck)} accent="purple" T={T} />
-              <Row label="Combined net paycheck" value={fmt(monthNetPaycheck)} bold accent="green" T={T} />
+              <SectionLabel text={`STEP 4 — PAYROLL (${salaryPct}% OF PAYROLL BASE, ONE COMBINED RUN)`} T={T} />
+              <Row label="Wages" value={fmt(monthP.wage)} sub T={T} />
+              <Row label="Employer FICA" value={`-${fmt(monthP.erFICA)}`} sub accent="red" T={T} />
+              <SectionLabel text="YOUR PAYCHECK (AFTER WITHHOLDING)" T={T} />
+              <Row label="Net paycheck" value={fmt(monthNetPaycheck)} bold accent="green" T={T} />
               <SectionLabel text="STEP 5 — DISTRIBUTION" T={T} />
               <Row label="After all payroll costs" value={fmt(monthAfterPayroll)} T={T} />
               <Row label="Owner distribution" value={fmt(monthDistribution)} bold accent="purple" T={T} />
@@ -910,16 +877,19 @@ export default function App() {
                 {monthPayrollRuns.map(r => (
                   <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${T.rowBorder}` }}>
                     <div>
-                      <span style={{ fontSize: 12, color: r.type === "flying" ? green : purple, fontWeight: 700 }}>
-                        {r.type === "flying" ? "✈ Flying" : "💼 Sales"}
+                      <span style={{ fontSize: 12, color: green, fontWeight: 700 }}>
+                        💵 Payroll run
                       </span>
                       <span style={{ fontSize: 11, color: T.textDim, marginLeft: 10 }}>{fmtDate(r.date)}</span>
+                      {r.flyGrossUsed != null && (
+                        <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>✈ {fmt(r.flyGrossUsed)} flying + 💼 {fmt(r.salesGrossUsed || 0)} sales</div>
+                      )}
                       {r.note && <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>{r.note}</div>}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontSize: 11, color: T.textDim }}>gross {fmt(r.gross)}</div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: r.type === "flying" ? green : purple }}>net {fmt(r.netCheck)}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: green }}>net {fmt(r.netCheck)}</div>
                       </div>
                       <button onClick={() => removePayrollRun(r.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
                     </div>
@@ -1034,8 +1004,6 @@ export default function App() {
               <Row label="Total expense reimbursements" value={fmt(ytdExpenses)} accent="blue" bold T={T} />
               <Row label="Remaining taxable base" value={fmt(ytdNetProfit)} bold accent="yellow" T={T} />
               <SectionLabel text="PAYCHECKS" T={T} />
-              <Row label="Flying net paychecks" value={fmt(ytdFlyP.netCheck)} accent="green" T={T} />
-              <Row label="Sales net paychecks" value={fmt(ytdSalesP.netCheck)} accent="purple" T={T} />
               <Row label="Total net paychecks" value={fmt(ytdNetPaycheck)} bold accent="green" T={T} />
               <SectionLabel text="TAX RESERVE & DISTRIBUTION" T={T} />
               <Row label={`Tax reserve (${taxReservePct}% auto-deducted)`} value={fmt(ytdTaxReserve)} accent="yellow" T={T} />
@@ -1126,9 +1094,8 @@ export default function App() {
         {tab === "settings" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <Card accentColor={yellow + "44"} T={T}>
-              <div style={{ fontSize: 11, color: yellow, letterSpacing: "0.15em", marginBottom: 16 }}>⚙️ SALARY RATIOS & RESERVE</div>
-              <SliderRow label="FLYING SALARY RATIO" value={flySalaryPct} min={20} max={60} onChange={setFlySalaryPct} color={green} showRisk hint="Contract pilot — 30–35% is defensible" T={T} />
-              <SliderRow label="SALES SALARY RATIO" value={salesSalaryPct} min={20} max={60} onChange={setSalesSalaryPct} color={purple} showRisk hint="Closer work — 35–40% recommended" T={T} />
+              <div style={{ fontSize: 11, color: yellow, letterSpacing: "0.15em", marginBottom: 16 }}>⚙️ SALARY RATIO & RESERVE</div>
+              <SliderRow label="SALARY RATIO" value={salaryPct} min={20} max={60} onChange={setSalaryPct} color={green} showRisk hint="One combined wage % applied to your single payroll run — 30–40% is generally defensible" T={T} />
               <SliderRow label="TAX RESERVE RATE" value={taxReservePct} min={5} max={30} onChange={setTaxReservePct} color={yellow} hint="Deducted from gross before payroll — auto-deposited to reserves account" T={T} />
             </Card>
             <Card accentColor={blue + "33"} T={T}>
