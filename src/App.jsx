@@ -289,10 +289,16 @@ export default function App() {
     const amt = parseFloat(salesInput);
     if (isNaN(amt) || amt <= 0) return;
     const existing = salesEntries.find(e => e.monthKey === viewKey);
+    const oldAmt = existing ? existing.amount : 0;
+    const delta = amt - oldAmt;
+    const taxAmt = Math.round(delta * taxReservePct / 100);
     if (existing) {
       setSalesEntries(prev => prev.map(e => e.monthKey === viewKey ? { ...e, amount: amt, note: salesNoteInput || e.note } : e));
     } else {
       setSalesEntries(prev => [...prev, { id: Date.now(), amount: amt, note: salesNoteInput, monthKey: viewKey }]);
+    }
+    if (taxAmt !== 0) {
+      addReserveDeposit(taxAmt, `Auto — Sales payout entered (${taxReservePct}% of ${fmt(Math.abs(delta))}${delta < 0 ? " reduction" : ""})`);
     }
     setSalesInput(""); setSalesNoteInput("");
   }
@@ -362,7 +368,6 @@ export default function App() {
       note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
-    if (salesTaxAmt > 0) addReserveDeposit(salesTaxAmt, `Auto — Payroll run, sales portion (${taxReservePct}% of ${fmt(monthSalesGross)})`);
     setRunNote("");
   }
   function removePayrollRun(id) { setPayrollRuns(prev => prev.filter(r => r.id !== id)); }
