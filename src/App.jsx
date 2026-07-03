@@ -218,10 +218,12 @@ export default function App() {
   const [expensePayouts, setExpensePayouts] = usePersist("sp_expensePayouts", []);
   const [healthPremium, setHealthPremium] = usePersist("sp_healthPremium", 0);
   const [reserveEvents, setReserveEvents] = usePersist("sp_reserveEvents", []);
+  const [flyBalanceAdjustment, setFlyBalanceAdjustment] = usePersist("sp_flyBalanceAdjustment", 0);
   const [runNote, setRunNote] = useState("");
   const [reserveCorrectionInput, setReserveCorrectionInput] = useState("");
   const [reserveWithdrawInput, setReserveWithdrawInput] = useState("");
   const [reserveNoteInput, setReserveNoteInput] = useState("");
+  const [flyBalanceCorrectionInput, setFlyBalanceCorrectionInput] = useState("");
 
   // Load from server on mount
   useEffect(() => {
@@ -238,6 +240,7 @@ export default function App() {
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
           if (data.healthPremium  !== undefined) { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
           if (data.reserveEvents)                { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
+          if (data.flyBalanceAdjustment !== undefined) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
         }
         setSyncStatus("synced");
       })
@@ -253,13 +256,13 @@ export default function App() {
       fetch(SYNC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents }),
+        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment }),
       })
         .then(r => r.ok ? setSyncStatus("synced") : setSyncStatus("error"))
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment]);
 
   const [viewMonth, setViewMonth] = useState(currentMonth);
   const [viewYear, setViewYear] = useState(currentYear);
@@ -311,16 +314,20 @@ export default function App() {
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
   // Cumulative flying balance — net of the tax already withheld when each job was marked
-  // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever.
-  // Runs logged before this net-basis change recorded consumption in gross dollars — convert
-  // those old figures to their net equivalent so they're on the same basis as the credit side.
+  // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever,
+  // plus a manual correction (see CORRECT BALANCE below) to square up against reality when
+  // historical records don't cleanly reconcile (e.g. old runs recorded in gross dollars).
   const totalFlyJobsNet    = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + (j.amount - (j.taxReserved || 0)), 0);
-  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => {
-    const used = r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0);
-    return s + (r.netBasis ? used : Math.round(used * (1 - taxReservePct / 100)));
-  }, 0);
+  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
-  const flyingBalance      = Math.max(0, totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross);
+  const flyingBalanceRaw   = totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross + flyBalanceAdjustment;
+  const flyingBalance      = Math.max(0, flyingBalanceRaw);
+  function applyFlyBalanceCorrection() {
+    const target = parseFloat(flyBalanceCorrectionInput);
+    if (isNaN(target)) return;
+    setFlyBalanceAdjustment(prev => prev + (target - flyingBalanceRaw));
+    setFlyBalanceCorrectionInput("");
+  }
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -360,7 +367,6 @@ export default function App() {
       flyGrossUsed: flyingBalance,
       salesGrossUsed: availableSales,
       taxReserve: 0,
-      netBasis: true,
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
@@ -670,6 +676,11 @@ export default function App() {
                   <div style={{ height: "100%", width: `${flyBalancePct}%`, background: payrollReady ? green : yellow, borderRadius: 3, transition: "width 0.4s" }} />
                 </div>
                 {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>Need {fmt(PAYROLL_THRESHOLD - flyingBalance)} more to run payroll</div>}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 10, color: T.textDim, whiteSpace: "nowrap" }}>Balance wrong?</span>
+                <input type="number" value={flyBalanceCorrectionInput} onChange={e => setFlyBalanceCorrectionInput(e.target.value)} placeholder={`Set to ($) — currently ${fmt(flyingBalance)}`} style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && applyFlyBalanceCorrection()} />
+                <button onClick={applyFlyBalanceCorrection} style={btnStyle(yellow)}>CORRECT</button>
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <input type="number" value={flyInput} onChange={e => setFlyInput(e.target.value)} placeholder="Job amount ($)" style={{ ...inputStyle, flex: "1 1 120px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
