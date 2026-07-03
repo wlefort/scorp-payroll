@@ -341,10 +341,10 @@ export default function App() {
   // Flying's tax reserve was already pulled (and deposited) when each job was marked
   // received, so only the sales portion gets a fresh tax deduction here.
   function markPayrollRun() {
-    const combinedGross = flyingBalance + monthSalesGross;
+    const availableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
+    const combinedGross = flyingBalance + availableSales;
     const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
-    const salesTaxAmt = Math.round(monthSalesGross * taxReservePct / 100);
-    const salesNet = monthSalesGross - salesTaxAmt;
+    const salesNet = availableSales; // tax already reserved when sales was entered
     const payBase = flyingNet + salesNet;
     const runP = calcPayroll(payBase, salaryPct);
     const run = {
@@ -354,7 +354,7 @@ export default function App() {
       monthKey: viewKey,
       gross: combinedGross,
       flyGrossUsed: flyingBalance,
-      salesGrossUsed: monthSalesGross,
+      salesGrossUsed: availableSales,
       taxReserve: salesTaxAmt,
       wage: runP.wage,
       netCheck: runP.netCheck,
@@ -372,6 +372,8 @@ export default function App() {
   const monthPayrollRuns  = payrollRuns.filter(r => r.monthKey === viewKey);
   const runThisMonth      = monthPayrollRuns.length > 0;
   const payrollReady      = flyingBalance >= PAYROLL_THRESHOLD;
+  // Sales already consumed in runs this month — prevents double-counting on subsequent runs
+  const salesUsedThisMonth = monthPayrollRuns.reduce((s, r) => s + (r.salesGrossUsed || 0), 0);
 
   // Expense-only payout (skip payroll)
   function logExpensePayout(action, taxAccount) {
@@ -738,15 +740,15 @@ export default function App() {
                 )}
               </div>
               <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
-              <Row label="This month's sales" value={fmt(monthSalesGross)} accent="purple" T={T} />
-              <Row label="Combined gross" value={fmt(flyingBalance + monthSalesGross)} bold T={T} />
+              <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(Math.max(0, monthSalesGross - salesUsedThisMonth))} accent="purple" T={T} />
+              <Row label="Combined gross" value={fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))} bold T={T} />
               <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
               {runThisMonth ? (
                 <div style={{ fontSize: 10, color: green, marginTop: 10 }}>✓ Payroll already run this month — see log below</div>
               ) : payrollReady ? (
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
-                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + monthSalesGross)}</button>
+                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))}</button>
                 </div>
               ) : (
                 <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>Waiting on flying balance to hit {fmt(PAYROLL_THRESHOLD)} before running payroll</div>
