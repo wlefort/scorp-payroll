@@ -736,14 +736,13 @@ export default function App() {
               <Row label="This month's sales" value={fmt(monthSalesGross)} accent="purple" T={T} />
               <Row label="Combined gross" value={fmt(flyingBalance + monthSalesGross)} bold T={T} />
               <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
-              {payrollReady ? (
-                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                  <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
-                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + monthSalesGross)}</button>
-                </div>
-              ) : (
-                <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>Waiting on flying balance to hit {fmt(PAYROLL_THRESHOLD)} before running payroll</div>
+              {!payrollReady && (
+                <div style={{ fontSize: 10, color: yellow, marginTop: 10 }}>Below the {fmt(PAYROLL_THRESHOLD)} threshold — you can still run payroll or mark it run.</div>
               )}
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
+                <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + monthSalesGross)}</button>
+              </div>
             </Card>
 
             {/* Expenses */}
