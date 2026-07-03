@@ -218,12 +218,10 @@ export default function App() {
   const [expensePayouts, setExpensePayouts] = usePersist("sp_expensePayouts", []);
   const [healthPremium, setHealthPremium] = usePersist("sp_healthPremium", 0);
   const [reserveEvents, setReserveEvents] = usePersist("sp_reserveEvents", []);
-  const [flyBalanceAdjustment, setFlyBalanceAdjustment] = usePersist("sp_flyBalanceAdjustment", 0);
   const [runNote, setRunNote] = useState("");
   const [reserveCorrectionInput, setReserveCorrectionInput] = useState("");
   const [reserveWithdrawInput, setReserveWithdrawInput] = useState("");
   const [reserveNoteInput, setReserveNoteInput] = useState("");
-  const [flyBalanceCorrectionInput, setFlyBalanceCorrectionInput] = useState("");
 
   // Load from server on mount
   useEffect(() => {
@@ -234,13 +232,25 @@ export default function App() {
           if (data.flyJobs)        { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
           if (data.salesEntries)   { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
           if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
-          if (data.payrollRuns)    { setPayrollRuns(data.payrollRuns);       localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns)); }
+          if (data.payrollRuns)    {
+            // One-time migration: runs logged before the net-of-tax accounting change recorded
+            // flying money consumed in gross dollars. Convert those to net so the ledger — net
+            // received jobs minus net amounts consumed by runs — reconciles correctly forever after.
+            const effectiveTaxPct = data.taxReservePct !== undefined ? data.taxReservePct : taxReservePct;
+            const migratedRuns = data.payrollRuns.map(r => {
+              if (r._flyNetMigrated) return r;
+              const rawFlyUsed = r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0);
+              if (!rawFlyUsed) return { ...r, _flyNetMigrated: true };
+              return { ...r, flyGrossUsed: Math.round(rawFlyUsed * (1 - effectiveTaxPct / 100)), _flyNetMigrated: true };
+            });
+            setPayrollRuns(migratedRuns);
+            localStorage.setItem("sp_payrollRuns", JSON.stringify(migratedRuns));
+          }
           if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
           if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
           if (data.healthPremium  !== undefined) { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
           if (data.reserveEvents)                { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
-          if (data.flyBalanceAdjustment !== undefined) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
         }
         setSyncStatus("synced");
       })
@@ -256,13 +266,13 @@ export default function App() {
       fetch(SYNC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment }),
+        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents }),
       })
         .then(r => r.ok ? setSyncStatus("synced") : setSyncStatus("error"))
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents]);
 
   const [viewMonth, setViewMonth] = useState(currentMonth);
   const [viewYear, setViewYear] = useState(currentYear);
@@ -314,20 +324,11 @@ export default function App() {
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
   // Cumulative flying balance — net of the tax already withheld when each job was marked
-  // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever,
-  // plus a manual correction (see CORRECT BALANCE below) to square up against reality when
-  // historical records don't cleanly reconcile (e.g. old runs recorded in gross dollars).
+  // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever.
   const totalFlyJobsNet    = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + (j.amount - (j.taxReserved || 0)), 0);
   const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
-  const flyingBalanceRaw   = totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross + flyBalanceAdjustment;
-  const flyingBalance      = Math.max(0, flyingBalanceRaw);
-  function applyFlyBalanceCorrection() {
-    const target = parseFloat(flyBalanceCorrectionInput);
-    if (isNaN(target)) return;
-    setFlyBalanceAdjustment(prev => prev + (target - flyingBalanceRaw));
-    setFlyBalanceCorrectionInput("");
-  }
+  const flyingBalance      = Math.max(0, totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -676,11 +677,6 @@ export default function App() {
                   <div style={{ height: "100%", width: `${flyBalancePct}%`, background: payrollReady ? green : yellow, borderRadius: 3, transition: "width 0.4s" }} />
                 </div>
                 {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>Need {fmt(PAYROLL_THRESHOLD - flyingBalance)} more to run payroll</div>}
-              </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-                <span style={{ fontSize: 10, color: T.textDim, whiteSpace: "nowrap" }}>Balance wrong?</span>
-                <input type="number" value={flyBalanceCorrectionInput} onChange={e => setFlyBalanceCorrectionInput(e.target.value)} placeholder={`Set to ($) — currently ${fmt(flyingBalance)}`} style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && applyFlyBalanceCorrection()} />
-                <button onClick={applyFlyBalanceCorrection} style={btnStyle(yellow)}>CORRECT</button>
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <input type="number" value={flyInput} onChange={e => setFlyInput(e.target.value)} placeholder="Job amount ($)" style={{ ...inputStyle, flex: "1 1 120px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
