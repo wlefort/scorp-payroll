@@ -970,10 +970,12 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Transaction history */}
-              {reserveEvents.length === 0
-                ? <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "10px 0" }}>No reserve transactions yet — auto-deposited when you mark payroll runs</div>
-                : [...reserveEvents].reverse().slice(0, 10).map(e => {
+              {/* Transaction history — filtered to current month */}
+              {(() => {
+                const monthEvents = reserveEvents.filter(e => e.date && e.date.startsWith(viewKey));
+                return monthEvents.length === 0
+                  ? <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "10px 0" }}>No reserve transactions this month</div>
+                  : [...monthEvents].reverse().map(e => {
                   const color = e.type === "withdrawal" ? A.red : e.type === "correction" ? blue : yellow;
                   const label = e.type === "withdrawal" ? "WITHDRAW" : e.type === "correction" ? "CORRECTION" : "DEPOSIT";
                   return (
@@ -989,8 +991,8 @@ export default function App() {
                       </div>
                     </div>
                   );
-                })
-              }
+                });
+              })()}
             </Card>
 
             {/* Hero */}
