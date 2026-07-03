@@ -403,7 +403,12 @@ export default function App() {
   const monthExpensePayout = expensePayouts.find(p => p.monthKey === viewKey);
 
   // Month data
-  const monthFlyJobsAll = flyJobs.filter(j => j.monthKey === viewKey);
+  // Pending jobs from earlier months carry forward into the current view until marked received
+  const carriedPending = flyJobs.filter(j => j.received === false && j.monthKey < viewKey);
+  const monthFlyJobsAll = [
+    ...flyJobs.filter(j => j.monthKey === viewKey),
+    ...carriedPending,
+  ];
   const monthFlyJobs = monthFlyJobsAll.filter(j => j.received !== false);
   const monthFlyJobsPending = monthFlyJobsAll.filter(j => j.received === false);
   const monthFlyGross = monthFlyJobs.reduce((s, j) => s + j.amount, 0);
@@ -672,7 +677,7 @@ export default function App() {
                     <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}`, opacity: isPending ? 0.7 : 1 }}>
                       <div>
                         <span style={{ fontSize: 12, color: T.textMuted }}>{j.note || "Flying job"}</span>
-                        {isPending && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED</span>}
+                        {isPending && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED{j.monthKey < viewKey ? ` · from ${MONTHS[parseInt(j.monthKey.split("-")[1])-1]}` : ""}</span>}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <span style={{ fontSize: 13, fontWeight: 700, color: isPending ? T.textDim : green }}>{fmt(j.amount)}</span>
