@@ -312,8 +312,13 @@ export default function App() {
 
   // Cumulative flying balance — net of the tax already withheld when each job was marked
   // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever.
+  // Runs logged before this net-basis change recorded consumption in gross dollars — convert
+  // those old figures to their net equivalent so they're on the same basis as the credit side.
   const totalFlyJobsNet    = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + (j.amount - (j.taxReserved || 0)), 0);
-  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
+  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => {
+    const used = r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0);
+    return s + (r.netBasis ? used : Math.round(used * (1 - taxReservePct / 100)));
+  }, 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
   const flyingBalance      = Math.max(0, totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
@@ -355,6 +360,7 @@ export default function App() {
       flyGrossUsed: flyingBalance,
       salesGrossUsed: availableSales,
       taxReserve: 0,
+      netBasis: true,
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
