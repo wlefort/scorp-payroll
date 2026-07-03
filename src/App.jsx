@@ -310,11 +310,12 @@ export default function App() {
   function toggleBanked(id) { setExpenses(prev => prev.map(e => e.id === id ? { ...e, banked: !e.banked } : e)); }
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
-  // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
-  const totalFlyJobsGross  = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + j.amount, 0);
+  // Cumulative flying balance — net of the tax already withheld when each job was marked
+  // received (the bank pulls taxReservePct% out automatically), minus all runs/payouts ever.
+  const totalFlyJobsNet    = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + (j.amount - (j.taxReserved || 0)), 0);
   const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
-  const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
+  const flyingBalance      = Math.max(0, totalFlyJobsNet - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -338,14 +339,12 @@ export default function App() {
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
   // Payroll run log — one combined run covering flying balance + this month's sales.
-  // Flying's tax reserve was already pulled (and deposited) when each job was marked
-  // received, so only the sales portion gets a fresh tax deduction here.
+  // Both flying (at receipt) and sales (at entry) already had tax reserved and deposited,
+  // so flyingBalance and availableSales here are already net — no further tax deduction.
   function markPayrollRun() {
     const availableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
     const combinedGross = flyingBalance + availableSales;
-    const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
-    const salesNet = availableSales; // tax already reserved when sales was entered
-    const payBase = flyingNet + salesNet;
+    const payBase = flyingBalance + availableSales;
     const runP = calcPayroll(payBase, salaryPct);
     const run = {
       id: Date.now(),
@@ -355,7 +354,7 @@ export default function App() {
       gross: combinedGross,
       flyGrossUsed: flyingBalance,
       salesGrossUsed: availableSales,
-      taxReserve: salesTaxAmt,
+      taxReserve: 0,
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
@@ -658,7 +657,7 @@ export default function App() {
               {/* Cumulative balance tracker */}
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                  <span style={{ fontSize: 11, color: T.textMuted }}>Cumulative balance</span>
+                  <span style={{ fontSize: 11, color: T.textMuted }}>Cumulative balance (net of tax)</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: payrollReady ? green : yellow }}>{fmt(flyingBalance)} / {fmt(PAYROLL_THRESHOLD)}</span>
                 </div>
                 <div style={{ height: 5, background: T.sliderTrack, borderRadius: 3, overflow: "hidden" }}>
@@ -739,7 +738,7 @@ export default function App() {
                   <span style={{ fontSize: 10, color: green, border: `1px solid ${green}`, borderRadius: 4, padding: "2px 8px" }}>✓ RUN LOGGED THIS MONTH</span>
                 )}
               </div>
-              <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
+              <Row label="Flying balance (received, net of tax)" value={fmt(flyingBalance)} accent="green" T={T} />
               <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(Math.max(0, monthSalesGross - salesUsedThisMonth))} accent="purple" T={T} />
               <Row label="Combined gross" value={fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))} bold T={T} />
               <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
