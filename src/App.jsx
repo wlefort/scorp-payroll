@@ -170,6 +170,50 @@ function getMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`;
 }
 
+// One-time bootstrap for the per-job usedInPayroll ledger: legacy payroll runs (logged before
+// per-job tracking existed) only recorded a lump gross dollar total consumed, not which specific
+// jobs it came from. Replay history chronologically — oldest received jobs get swept by the
+// earliest runs first — until each run's recorded amount (converted to net) is accounted for.
+// Any job left unconsumed after replay is genuinely still available. Idempotent: runs that
+// already have usedFlyJobIds are left untouched and skipped.
+function migrateFlyLedger(jobs, runs, taxPct) {
+  const sortedJobs = jobs
+    .filter(j => j.received !== false)
+    .sort((a, b) => {
+      const ad = a.receivedDate || String(a.id);
+      const bd = b.receivedDate || String(b.id);
+      return ad < bd ? -1 : ad > bd ? 1 : 0;
+    });
+  const sortedRuns = runs
+    .filter(r => !r.usedFlyJobIds)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const usedIds = new Set();
+  const runUsedMap = {};
+  let jobPointer = 0;
+  for (const run of sortedRuns) {
+    const rawUsed = run.flyGrossUsed != null ? run.flyGrossUsed : (run.type === "flying" ? (run.gross || 0) : 0);
+    if (!rawUsed) { runUsedMap[run.id] = []; continue; }
+    const target = Math.round(rawUsed * (1 - taxPct / 100));
+    let consumed = 0;
+    const ids = [];
+    while (jobPointer < sortedJobs.length && consumed < target - 0.5) {
+      const j = sortedJobs[jobPointer];
+      if (!usedIds.has(j.id)) {
+        consumed += j.amount - (j.taxReserved || 0);
+        usedIds.add(j.id);
+        ids.push(j.id);
+      }
+      jobPointer++;
+    }
+    runUsedMap[run.id] = ids;
+  }
+
+  const migratedJobs = jobs.map(j => usedIds.has(j.id) ? { ...j, usedInPayroll: true } : j);
+  const migratedRuns = runs.map(r => r.usedFlyJobIds ? r : { ...r, usedFlyJobIds: runUsedMap[r.id] || [] });
+  return { migratedJobs, migratedRuns };
+}
+
 export default function App() {
   const [dark, setDark] = useState(false);
   const T = dark ? DARK : LIGHT;
@@ -232,7 +276,14 @@ export default function App() {
           if (data.flyJobs)        { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
           if (data.salesEntries)   { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
           if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
-          if (data.payrollRuns)    { setPayrollRuns(data.payrollRuns);       localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns)); }
+          if (data.flyJobs && data.payrollRuns && data.payrollRuns.some(r => !r.usedFlyJobIds)) {
+            const taxPct = data.taxReservePct !== undefined ? data.taxReservePct : taxReservePct;
+            const { migratedJobs, migratedRuns } = migrateFlyLedger(data.flyJobs, data.payrollRuns, taxPct);
+            setFlyJobs(migratedJobs);       localStorage.setItem("sp_flyJobs", JSON.stringify(migratedJobs));
+            setPayrollRuns(migratedRuns);   localStorage.setItem("sp_payrollRuns", JSON.stringify(migratedRuns));
+          } else if (data.payrollRuns) {
+            setPayrollRuns(data.payrollRuns); localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns));
+          }
           if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
           if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
