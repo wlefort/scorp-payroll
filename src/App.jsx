@@ -232,7 +232,24 @@ export default function App() {
           if (data.flyJobs)        { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
           if (data.salesEntries)   { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
           if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
-          if (data.payrollRuns)    { setPayrollRuns(data.payrollRuns);       localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns)); }
+          if (data.payrollRuns)    {
+            // One-time cleanup: an earlier (reverted) version of this app permanently rewrote
+            // flyGrossUsed on historical runs, shrinking it by the tax %, then persisted that
+            // to the synced data. The code that did this is gone, but the mutated numbers are
+            // still sitting in storage. Reverse the multiplication on any run still carrying
+            // that migration's marker, then drop the marker so this never runs twice.
+            const effectiveTaxPct = data.taxReservePct !== undefined ? data.taxReservePct : taxReservePct;
+            const cleanedRuns = data.payrollRuns.map(r => {
+              if (!r._flyNetMigrated) return r;
+              const { _flyNetMigrated, usedFlyJobIds, ...rest } = r;
+              if (rest.flyGrossUsed != null && effectiveTaxPct < 100) {
+                rest.flyGrossUsed = Math.round(rest.flyGrossUsed / (1 - effectiveTaxPct / 100));
+              }
+              return rest;
+            });
+            setPayrollRuns(cleanedRuns);
+            localStorage.setItem("sp_payrollRuns", JSON.stringify(cleanedRuns));
+          }
           if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
           if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
