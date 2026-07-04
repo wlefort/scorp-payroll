@@ -170,50 +170,6 @@ function getMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`;
 }
 
-// One-time bootstrap for the per-job usedInPayroll ledger: legacy payroll runs (logged before
-// per-job tracking existed) only recorded a lump gross dollar total consumed, not which specific
-// jobs it came from. Replay history chronologically — oldest received jobs get swept by the
-// earliest runs first — until each run's recorded amount (converted to net) is accounted for.
-// Any job left unconsumed after replay is genuinely still available. Idempotent: runs that
-// already have usedFlyJobIds are left untouched and skipped.
-function migrateFlyLedger(jobs, runs, taxPct) {
-  const sortedJobs = jobs
-    .filter(j => j.received !== false)
-    .sort((a, b) => {
-      const ad = a.receivedDate || String(a.id);
-      const bd = b.receivedDate || String(b.id);
-      return ad < bd ? -1 : ad > bd ? 1 : 0;
-    });
-  const sortedRuns = runs
-    .filter(r => !r.usedFlyJobIds)
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-
-  const usedIds = new Set();
-  const runUsedMap = {};
-  let jobPointer = 0;
-  for (const run of sortedRuns) {
-    const rawUsed = run.flyGrossUsed != null ? run.flyGrossUsed : (run.type === "flying" ? (run.gross || 0) : 0);
-    if (!rawUsed) { runUsedMap[run.id] = []; continue; }
-    const target = Math.round(rawUsed * (1 - taxPct / 100));
-    let consumed = 0;
-    const ids = [];
-    while (jobPointer < sortedJobs.length && consumed < target - 0.5) {
-      const j = sortedJobs[jobPointer];
-      if (!usedIds.has(j.id)) {
-        consumed += j.amount - (j.taxReserved || 0);
-        usedIds.add(j.id);
-        ids.push(j.id);
-      }
-      jobPointer++;
-    }
-    runUsedMap[run.id] = ids;
-  }
-
-  const migratedJobs = jobs.map(j => usedIds.has(j.id) ? { ...j, usedInPayroll: true } : j);
-  const migratedRuns = runs.map(r => r.usedFlyJobIds ? r : { ...r, usedFlyJobIds: runUsedMap[r.id] || [] });
-  return { migratedJobs, migratedRuns };
-}
-
 export default function App() {
   const [dark, setDark] = useState(false);
   const T = dark ? DARK : LIGHT;
@@ -276,14 +232,7 @@ export default function App() {
           if (data.flyJobs)        { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
           if (data.salesEntries)   { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
           if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
-          if (data.flyJobs && data.payrollRuns && data.payrollRuns.some(r => !r.usedFlyJobIds)) {
-            const taxPct = data.taxReservePct !== undefined ? data.taxReservePct : taxReservePct;
-            const { migratedJobs, migratedRuns } = migrateFlyLedger(data.flyJobs, data.payrollRuns, taxPct);
-            setFlyJobs(migratedJobs);       localStorage.setItem("sp_flyJobs", JSON.stringify(migratedJobs));
-            setPayrollRuns(migratedRuns);   localStorage.setItem("sp_payrollRuns", JSON.stringify(migratedRuns));
-          } else if (data.payrollRuns) {
-            setPayrollRuns(data.payrollRuns); localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns));
-          }
+          if (data.payrollRuns)    { setPayrollRuns(data.payrollRuns);       localStorage.setItem("sp_payrollRuns", JSON.stringify(data.payrollRuns)); }
           if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
           if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
@@ -361,13 +310,11 @@ export default function App() {
   function toggleBanked(id) { setExpenses(prev => prev.map(e => e.id === id ? { ...e, banked: !e.banked } : e)); }
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
-  // Cumulative flying balance — net of the tax already withheld when each job was marked
-  // received, summed only over jobs not yet swept into a payroll run or expense payout.
-  // Consumption is tracked per-job (usedInPayroll flag) rather than as a separate running
-  // total, so deleting an old already-paid job can never throw off the balance for new jobs.
-  const totalFlyJobsNet    = flyJobs.filter(j => j.received !== false && !j.usedInPayroll).reduce((s, j) => s + (j.amount - (j.taxReserved || 0)), 0);
+  // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
+  const totalFlyJobsGross  = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + j.amount, 0);
+  const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
-  const flyingBalance      = Math.max(0, totalFlyJobsNet - totalFlyExpPayoutGross);
+  const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -391,14 +338,15 @@ export default function App() {
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
   // Payroll run log — one combined run covering flying balance + this month's sales.
-  // Both flying (at receipt) and sales (at entry) already had tax reserved and deposited,
-  // so flyingBalance and availableSales here are already net — no further tax deduction.
+  // Flying's tax reserve was already pulled (and deposited) when each job was marked
+  // received, so only the sales portion gets a fresh tax deduction here.
   function markPayrollRun() {
     const availableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
     const combinedGross = flyingBalance + availableSales;
-    const payBase = flyingBalance + availableSales;
+    const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
+    const salesNet = availableSales; // tax already reserved when sales was entered
+    const payBase = flyingNet + salesNet;
     const runP = calcPayroll(payBase, salaryPct);
-    const usedJobIds = flyJobs.filter(j => j.received !== false && !j.usedInPayroll).map(j => j.id);
     const run = {
       id: Date.now(),
       type: "combined",
@@ -407,8 +355,7 @@ export default function App() {
       gross: combinedGross,
       flyGrossUsed: flyingBalance,
       salesGrossUsed: availableSales,
-      taxReserve: 0,
-      usedFlyJobIds: usedJobIds,
+      taxReserve: salesTaxAmt,
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
@@ -418,16 +365,9 @@ export default function App() {
       note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
-    setFlyJobs(prev => prev.map(j => usedJobIds.includes(j.id) ? { ...j, usedInPayroll: true } : j));
     setRunNote("");
   }
-  function removePayrollRun(id) {
-    const run = payrollRuns.find(r => r.id === id);
-    if (run && run.usedFlyJobIds) {
-      setFlyJobs(prev => prev.map(j => run.usedFlyJobIds.includes(j.id) ? { ...j, usedInPayroll: false } : j));
-    }
-    setPayrollRuns(prev => prev.filter(r => r.id !== id));
-  }
+  function removePayrollRun(id) { setPayrollRuns(prev => prev.filter(r => r.id !== id)); }
 
   const monthPayrollRuns  = payrollRuns.filter(r => r.monthKey === viewKey);
   const runThisMonth      = monthPayrollRuns.length > 0;
@@ -718,7 +658,7 @@ export default function App() {
               {/* Cumulative balance tracker */}
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                  <span style={{ fontSize: 11, color: T.textMuted }}>Cumulative balance (net of tax)</span>
+                  <span style={{ fontSize: 11, color: T.textMuted }}>Cumulative balance</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: payrollReady ? green : yellow }}>{fmt(flyingBalance)} / {fmt(PAYROLL_THRESHOLD)}</span>
                 </div>
                 <div style={{ height: 5, background: T.sliderTrack, borderRadius: 3, overflow: "hidden" }}>
@@ -799,7 +739,7 @@ export default function App() {
                   <span style={{ fontSize: 10, color: green, border: `1px solid ${green}`, borderRadius: 4, padding: "2px 8px" }}>✓ RUN LOGGED THIS MONTH</span>
                 )}
               </div>
-              <Row label="Flying balance (received, net of tax)" value={fmt(flyingBalance)} accent="green" T={T} />
+              <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
               <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(Math.max(0, monthSalesGross - salesUsedThisMonth))} accent="purple" T={T} />
               <Row label="Combined gross" value={fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))} bold T={T} />
               <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
