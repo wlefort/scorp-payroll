@@ -303,18 +303,30 @@ export default function App() {
     const amt = parseFloat(salesInput);
     if (isNaN(amt) || amt <= 0) return;
     const existing = salesEntries.find(e => e.monthKey === viewKey);
-    const oldAmt = existing ? existing.amount : 0;
-    const delta = amt - oldAmt;
-    const taxAmt = Math.round(delta * taxReservePct / 100);
     if (existing) {
+      // Correcting an amount after it's already landed — adjust the reserve by the delta.
+      // If it's still pending, no tax has been reserved yet, so just update the number.
+      if (existing.received) {
+        const delta = amt - existing.amount;
+        const taxAmt = Math.round(delta * taxReservePct / 100);
+        if (taxAmt !== 0) {
+          addReserveDeposit(taxAmt, `Auto — Sales payout corrected (${taxReservePct}% of ${fmt(Math.abs(delta))}${delta < 0 ? " reduction" : ""})`);
+        }
+      }
       setSalesEntries(prev => prev.map(e => e.monthKey === viewKey ? { ...e, amount: amt, note: salesNoteInput || e.note } : e));
     } else {
-      setSalesEntries(prev => [...prev, { id: Date.now(), amount: amt, note: salesNoteInput, monthKey: viewKey }]);
-    }
-    if (taxAmt !== 0) {
-      addReserveDeposit(taxAmt, `Auto — Sales payout entered (${taxReservePct}% of ${fmt(Math.abs(delta))}${delta < 0 ? " reduction" : ""})`);
+      setSalesEntries(prev => [...prev, { id: Date.now(), amount: amt, note: salesNoteInput, monthKey: viewKey, received: false }]);
     }
     setSalesInput(""); setSalesNoteInput("");
+  }
+  // Mark an invoiced-but-not-yet-landed sales payout as received — mirrors flying jobs: tax
+  // reserve is deposited now, at the moment the money actually hits the account.
+  function markSalesReceived(id) {
+    const entry = salesEntries.find(e => e.id === id);
+    if (!entry || entry.received) return;
+    const taxAmt = Math.round(entry.amount * taxReservePct / 100);
+    setSalesEntries(prev => prev.map(e => e.id === id ? { ...e, received: true, taxReserved: taxAmt, receivedDate: new Date().toISOString() } : e));
+    addReserveDeposit(taxAmt, `Auto — Sales payout received (${taxReservePct}% of ${fmt(entry.amount)})`);
   }
 
   function addExpense() {
@@ -433,7 +445,8 @@ export default function App() {
   const monthFlyGross = monthFlyJobs.reduce((s, j) => s + j.amount, 0);
   const monthFlyPendingGross = monthFlyJobsPending.reduce((s, j) => s + j.amount, 0);
   const monthSalesEntry = salesEntries.find(e => e.monthKey === viewKey);
-  const monthSalesGross = monthSalesEntry ? monthSalesEntry.amount : 0;
+  const monthSalesGross = (monthSalesEntry && monthSalesEntry.received !== false) ? monthSalesEntry.amount : 0;
+  const salesCarriedPending = salesEntries.filter(e => e.received === false && e.monthKey < viewKey);
   const monthExpenses = expenses.filter(e => e.monthKey === viewKey);
   const monthActiveExp = monthExpenses.filter(e => !e.banked);
   const monthBankedExp = monthExpenses.filter(e => e.banked);
@@ -442,7 +455,7 @@ export default function App() {
 
   // YTD data
   const ytdFlyGross   = flyJobs.filter(j => j.monthKey.startsWith(String(viewYear)) && j.received !== false).reduce((s,j) => s+j.amount, 0);
-  const ytdSalesGross = salesEntries.filter(e => e.monthKey.startsWith(String(viewYear))).reduce((s,e) => s+e.amount, 0);
+  const ytdSalesGross = salesEntries.filter(e => e.monthKey.startsWith(String(viewYear)) && e.received !== false).reduce((s,e) => s+e.amount, 0);
   const ytdExpenses   = expenses.filter(e => e.monthKey.startsWith(String(viewYear)) && !e.banked).reduce((s,e) => s+e.amount, 0);
   const ytdGross = ytdFlyGross + ytdSalesGross;
 
@@ -732,6 +745,21 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                 <span style={{ fontSize: 11, color: purple, letterSpacing: "0.15em" }}>💼 SALES PAYOUT — {MONTHS[viewMonth]} 10th</span>
               </div>
+              {salesCarriedPending.length > 0 && salesCarriedPending.map(e => (
+                <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}`, opacity: 0.7, marginBottom: 8 }}>
+                  <div>
+                    <span style={{ fontSize: 12, color: T.textMuted }}>{e.note || "Sales payout"}</span>
+                    <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED · from {MONTHS[parseInt(e.monthKey.split("-")[1]) - 1]}</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: T.textDim }}>{fmt(e.amount)}</span>
+                    <button onClick={() => markSalesReceived(e.id)} title="Mark as received in business account — auto-reserves tax" style={{ background: purple + "22", border: `1px solid ${purple}`, borderRadius: 6, color: purple, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                      ✓ RECEIVED
+                    </button>
+                    <button onClick={() => setSalesEntries(prev => prev.filter(s => s.id !== e.id))} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+                  </div>
+                </div>
+              ))}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
                 <input type="number" value={salesInput} onChange={e => setSalesInput(e.target.value)} placeholder={monthSalesEntry ? `Current: ${fmt(monthSalesEntry.amount)}` : "Monthly payout ($)"} style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && addSales()} />
                 <button onClick={addSales} style={btnStyle(purple)}>{monthSalesEntry ? "UPDATE" : "+ SET"}</button>
@@ -740,9 +768,19 @@ export default function App() {
               <input type="text" value={salesNoteInput} onChange={e => setSalesNoteInput(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, marginBottom: 4 }} onKeyDown={e => e.key === "Enter" && addSales()} />
               {monthSalesEntry && (
                 <div style={{ padding: "8px 0" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 12, color: T.textMuted }}>{monthSalesEntry.note || "Monthly sales payout"}</span>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: purple }}>{fmt(monthSalesEntry.amount)}</span>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <span style={{ fontSize: 12, color: T.textMuted }}>{monthSalesEntry.note || "Monthly sales payout"}</span>
+                      {monthSalesEntry.received === false && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED</span>}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: monthSalesEntry.received === false ? T.textDim : purple }}>{fmt(monthSalesEntry.amount)}</span>
+                      {monthSalesEntry.received === false && (
+                        <button onClick={() => markSalesReceived(monthSalesEntry.id)} title="Mark as received in business account — auto-reserves tax" style={{ background: purple + "22", border: `1px solid ${purple}`, borderRadius: 6, color: purple, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                          ✓ RECEIVED
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
