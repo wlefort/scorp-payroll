@@ -218,7 +218,9 @@ export default function App() {
   const [expensePayouts, setExpensePayouts] = usePersist("sp_expensePayouts", []);
   const [healthPremium, setHealthPremium] = usePersist("sp_healthPremium", 0);
   const [reserveEvents, setReserveEvents] = usePersist("sp_reserveEvents", []);
+  const [flyBalanceAdjustment, setFlyBalanceAdjustment] = usePersist("sp_flyBalanceAdjustment", 0);
   const [runNote, setRunNote] = useState("");
+  const [flyBalanceCorrectionInput, setFlyBalanceCorrectionInput] = useState("");
   const [reserveCorrectionInput, setReserveCorrectionInput] = useState("");
   const [reserveWithdrawInput, setReserveWithdrawInput] = useState("");
   const [reserveNoteInput, setReserveNoteInput] = useState("");
@@ -255,6 +257,7 @@ export default function App() {
           if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
           if (data.healthPremium  !== undefined) { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
           if (data.reserveEvents)                { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
+          if (data.flyBalanceAdjustment !== undefined) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
         }
         setSyncStatus("synced");
       })
@@ -270,13 +273,13 @@ export default function App() {
       fetch(SYNC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents }),
+        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment }),
       })
         .then(r => r.ok ? setSyncStatus("synced") : setSyncStatus("error"))
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment]);
 
   const [viewMonth, setViewMonth] = useState(currentMonth);
   const [viewYear, setViewYear] = useState(currentYear);
@@ -291,11 +294,14 @@ export default function App() {
   function removeFlyJob(id) { setFlyJobs(prev => prev.filter(j => j.id !== id)); }
   // Mark an invoiced flying job as received — money landed in the business account, bank
   // auto-withholds the tax reserve %, so mirror that deposit immediately (not at payroll run time).
+  // The job's monthKey moves to the month the money actually landed (cash basis), so it shows up
+  // in the current month's totals instead of jumping back to the month it was invoiced; the
+  // original invoice month is kept on invoicedMonthKey.
   function markFlyJobReceived(id) {
     const job = flyJobs.find(j => j.id === id);
     if (!job || job.received) return;
     const taxAmt = Math.round(job.amount * taxReservePct / 100);
-    setFlyJobs(prev => prev.map(j => j.id === id ? { ...j, received: true, taxReserved: taxAmt, receivedDate: new Date().toISOString() } : j));
+    setFlyJobs(prev => prev.map(j => j.id === id ? { ...j, received: true, taxReserved: taxAmt, receivedDate: new Date().toISOString(), invoicedMonthKey: j.monthKey, monthKey: getMonthKey(new Date()) } : j));
     addReserveDeposit(taxAmt, `Auto — Flying job received (${taxReservePct}% of ${fmt(job.amount)})`);
   }
 
@@ -339,11 +345,20 @@ export default function App() {
   function toggleBanked(id) { setExpenses(prev => prev.map(e => e.id === id ? { ...e, banked: !e.banked } : e)); }
   function applyBanked() { setExpenses(prev => prev.map(e => e.banked ? { ...e, banked: false } : e)); }
 
-  // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense payouts
+  // Cumulative flying balance — all jobs ever minus all runs ever minus already-taken expense
+  // payouts, plus a manual correction offset (see "Balance wrong?" below) to square up against
+  // reality when historical records don't cleanly reconcile.
   const totalFlyJobsGross  = flyJobs.filter(j => j.received !== false).reduce((s, j) => s + j.amount, 0);
   const totalFlyRunsGross  = payrollRuns.reduce((s, r) => s + (r.flyGrossUsed != null ? r.flyGrossUsed : (r.type === "flying" ? (r.gross || 0) : 0)), 0);
   const totalFlyExpPayoutGross = expensePayouts.reduce((s, p) => s + (p.flyGrossTaken || 0), 0);
-  const flyingBalance      = Math.max(0, totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross);
+  const flyingBalanceRaw   = totalFlyJobsGross - totalFlyRunsGross - totalFlyExpPayoutGross + flyBalanceAdjustment;
+  const flyingBalance      = Math.max(0, flyingBalanceRaw);
+  function applyFlyBalanceCorrection() {
+    const target = parseFloat(flyBalanceCorrectionInput);
+    if (isNaN(target) || target < 0) return;
+    setFlyBalanceAdjustment(prev => prev + (target - flyingBalanceRaw));
+    setFlyBalanceCorrectionInput("");
+  }
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
   // Reserve balance helpers
@@ -367,13 +382,15 @@ export default function App() {
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
   // Payroll run log — one combined run covering flying balance + this month's sales.
-  // Flying's tax reserve was already pulled (and deposited) when each job was marked
-  // received, so only the sales portion gets a fresh tax deduction here.
+  // The tax reserve was already withheld (and deposited to the reserves account) when each
+  // flying job / sales payout was marked received, so no fresh reserve deposit happens here —
+  // but the balances are tracked gross, so the wage base nets that already-withheld tax back
+  // out of both streams to reflect the cash actually left in the account.
   function markPayrollRun() {
     const availableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
     const combinedGross = flyingBalance + availableSales;
     const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
-    const salesNet = availableSales; // tax already reserved when sales was entered
+    const salesNet = Math.round(availableSales * (1 - taxReservePct / 100));
     const payBase = flyingNet + salesNet;
     const runP = calcPayroll(payBase, salaryPct);
     const run = {
@@ -384,7 +401,7 @@ export default function App() {
       gross: combinedGross,
       flyGrossUsed: flyingBalance,
       salesGrossUsed: availableSales,
-      taxReserve: salesTaxAmt,
+      taxReserve: 0, // reserved at receipt time for both streams, not at run time
       wage: runP.wage,
       netCheck: runP.netCheck,
       erFICA: runP.erFICA,
@@ -695,6 +712,16 @@ export default function App() {
                   <div style={{ height: "100%", width: `${flyBalancePct}%`, background: payrollReady ? green : yellow, borderRadius: 3, transition: "width 0.4s" }} />
                 </div>
                 {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>Need {fmt(PAYROLL_THRESHOLD - flyingBalance)} more to run payroll</div>}
+                {flyingBalance > monthFlyGross && (
+                  <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>
+                    Includes {fmt(flyingBalance - monthFlyGross)} received in earlier months, not yet run through payroll
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: 10, color: T.textDim, whiteSpace: "nowrap" }}>Balance wrong?</span>
+                <input type="number" value={flyBalanceCorrectionInput} onChange={e => setFlyBalanceCorrectionInput(e.target.value)} placeholder={`Set to ($) — currently ${fmt(flyingBalance)}`} style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && applyFlyBalanceCorrection()} />
+                <button onClick={applyFlyBalanceCorrection} style={btnStyle(yellow)}>CORRECT</button>
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <input type="number" value={flyInput} onChange={e => setFlyInput(e.target.value)} placeholder="Job amount ($)" style={{ ...inputStyle, flex: "1 1 120px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
@@ -797,7 +824,7 @@ export default function App() {
               <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
               <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(Math.max(0, monthSalesGross - salesUsedThisMonth))} accent="purple" T={T} />
               <Row label="Combined gross" value={fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))} bold T={T} />
-              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Flying's {taxReservePct}% tax reserve was already set aside when each job was marked received — only the sales portion gets a fresh deduction here.</div>
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount, no fresh deduction here.</div>
               {runThisMonth ? (
                 <div style={{ fontSize: 10, color: green, marginTop: 10 }}>✓ Payroll already run this month — see log below</div>
               ) : payrollReady ? (
