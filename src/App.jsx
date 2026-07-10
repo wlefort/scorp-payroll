@@ -387,27 +387,21 @@ export default function App() {
   // but the balances are tracked gross, so the wage base nets that already-withheld tax back
   // out of both streams to reflect the cash actually left in the account.
   function markPayrollRun() {
-    const availableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
-    const combinedGross = flyingBalance + availableSales;
-    const flyingNet = Math.round(flyingBalance * (1 - taxReservePct / 100));
-    const salesNet = Math.round(availableSales * (1 - taxReservePct / 100));
-    const payBase = flyingNet + salesNet;
-    const runP = calcPayroll(payBase, salaryPct);
     const run = {
       id: Date.now(),
       type: "combined",
       date: new Date().toISOString(),
       monthKey: viewKey,
-      gross: combinedGross,
+      gross: runCombinedGross,
       flyGrossUsed: flyingBalance,
-      salesGrossUsed: availableSales,
+      salesGrossUsed: runAvailableSales,
       taxReserve: 0, // reserved at receipt time for both streams, not at run time
-      wage: runP.wage,
-      netCheck: runP.netCheck,
-      erFICA: runP.erFICA,
-      eeFICA: runP.eeFICA,
-      fedWH: runP.fedWH,
-      scWH: runP.scWH,
+      wage: runPreview.wage,
+      netCheck: runPreview.netCheck,
+      erFICA: runPreview.erFICA,
+      eeFICA: runPreview.eeFICA,
+      fedWH: runPreview.fedWH,
+      scWH: runPreview.scWH,
       note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
@@ -464,6 +458,15 @@ export default function App() {
   const monthSalesEntry = salesEntries.find(e => e.monthKey === viewKey);
   const monthSalesGross = (monthSalesEntry && monthSalesEntry.received !== false) ? monthSalesEntry.amount : 0;
   const salesCarriedPending = salesEntries.filter(e => e.received === false && e.monthKey < viewKey);
+
+  // "If you ran payroll right now" — computed from the money currently in the bank
+  // (flying balance + unconsumed sales, both net of the tax withheld at receipt).
+  // Shared by the preview in the PAYROLL RUN card and markPayrollRun, so the logged
+  // run always matches exactly what the preview showed.
+  const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
+  const runCombinedGross  = flyingBalance + runAvailableSales;
+  const runPayBase        = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
+  const runPreview        = calcPayroll(runPayBase, salaryPct);
   const monthExpenses = expenses.filter(e => e.monthKey === viewKey);
   const monthActiveExp = monthExpenses.filter(e => !e.banked);
   const monthBankedExp = monthExpenses.filter(e => e.banked);
@@ -822,15 +825,21 @@ export default function App() {
                 )}
               </div>
               <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
-              <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(Math.max(0, monthSalesGross - salesUsedThisMonth))} accent="purple" T={T} />
-              <Row label="Combined gross" value={fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))} bold T={T} />
+              <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(runAvailableSales)} accent="purple" T={T} />
+              <Row label="Combined gross" value={fmt(runCombinedGross)} bold T={T} />
               <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount, no fresh deduction here.</div>
+              <SectionLabel text="IF YOU RAN PAYROLL RIGHT NOW" T={T} />
+              <Row label={`After-tax pay base`} value={fmt(runPayBase)} T={T} />
+              <Row label={`Wages (${salaryPct}% of base)`} value={fmt(runPreview.wage)} sub T={T} />
+              <Row label="Employer FICA" value={`-${fmt(runPreview.erFICA)}`} sub accent="red" T={T} />
+              <Row label="Net paycheck to you" value={fmt(runPreview.netCheck)} bold accent="green" T={T} />
+              <Row label="Owner distribution to you" value={fmt(runPreview.afterPayroll)} bold accent="purple" T={T} />
               {runThisMonth ? (
                 <div style={{ fontSize: 10, color: green, marginTop: 10 }}>✓ Payroll already run this month — see log below</div>
               ) : payrollReady ? (
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
-                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(flyingBalance + Math.max(0, monthSalesGross - salesUsedThisMonth))}</button>
+                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(runCombinedGross)}</button>
                 </div>
               ) : (
                 <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>Waiting on flying balance to hit {fmt(PAYROLL_THRESHOLD)} before running payroll</div>
