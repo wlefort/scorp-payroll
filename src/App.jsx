@@ -387,6 +387,7 @@ export default function App() {
   // but the balances are tracked gross, so the wage base nets that already-withheld tax back
   // out of both streams to reflect the cash actually left in the account.
   function markPayrollRun() {
+    if (runCombinedGross <= 0) return;
     const run = {
       id: Date.now(),
       type: "combined",
@@ -714,7 +715,7 @@ export default function App() {
                 <div style={{ height: 5, background: T.sliderTrack, borderRadius: 3, overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${flyBalancePct}%`, background: payrollReady ? green : yellow, borderRadius: 3, transition: "width 0.4s" }} />
                 </div>
-                {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>Need {fmt(PAYROLL_THRESHOLD - flyingBalance)} more to run payroll</div>}
+                {!payrollReady && <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>{fmt(PAYROLL_THRESHOLD - flyingBalance)} short of the {fmt(PAYROLL_THRESHOLD)} batching target — you can still run payroll anytime</div>}
                 {flyingBalance > monthFlyGross && (
                   <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>
                     Includes {fmt(flyingBalance - monthFlyGross)} received in earlier months, not yet run through payroll
@@ -834,15 +835,15 @@ export default function App() {
               <Row label="Employer FICA" value={`-${fmt(runPreview.erFICA)}`} sub accent="red" T={T} />
               <Row label="Net paycheck to you" value={fmt(runPreview.netCheck)} bold accent="green" T={T} />
               <Row label="Owner distribution to you" value={fmt(runPreview.afterPayroll)} bold accent="purple" T={T} />
-              {runThisMonth ? (
-                <div style={{ fontSize: 10, color: green, marginTop: 10 }}>✓ Payroll already run this month — see log below</div>
-              ) : payrollReady ? (
+              {runCombinedGross > 0 ? (
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
                   <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(runCombinedGross)}</button>
                 </div>
               ) : (
-                <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>Waiting on flying balance to hit {fmt(PAYROLL_THRESHOLD)} before running payroll</div>
+                <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>
+                  {runThisMonth ? "✓ Payroll run logged — the button comes back as soon as new money lands" : "Nothing in the bank yet — mark income received to run payroll"}
+                </div>
               )}
             </Card>
 
@@ -1250,7 +1251,7 @@ export default function App() {
             <Card T={T}>
               <div style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.15em", marginBottom: 12 }}>PAYROLL THRESHOLD</div>
               <div style={{ fontSize: 13, color: T.textSub, lineHeight: 1.6 }}>
-                Flying payroll flags ready at <span style={{ color: green, fontWeight: 700 }}>{fmt(PAYROLL_THRESHOLD)}</span> accumulated.<br />
+                The <span style={{ color: green, fontWeight: 700 }}>{fmt(PAYROLL_THRESHOLD)}</span> mark is a batching target — the balance bar tracks progress toward it, but you can run payroll at any amount.<br />
                 Sales payroll runs on the <span style={{ color: purple, fontWeight: 700 }}>10th</span> of each month.
               </div>
               <div style={{ fontSize: 11, color: T.textDim, marginTop: 10, lineHeight: 1.6 }}>
