@@ -396,6 +396,7 @@ export default function App() {
       gross: runCombinedGross,
       flyGrossUsed: flyingBalance,
       salesGrossUsed: runAvailableSales,
+      expenseReimbUsed: runExpenseApplied,
       taxReserve: 0, // reserved at receipt time for both streams, not at run time
       wage: runPreview.wage,
       netCheck: runPreview.netCheck,
@@ -416,33 +417,10 @@ export default function App() {
   // Sales already consumed in runs this month — prevents double-counting on subsequent runs
   const salesUsedThisMonth = monthPayrollRuns.reduce((s, r) => s + (r.salesGrossUsed || 0), 0);
 
-  // Expense-only payout (skip payroll)
-  function logExpensePayout(action, taxAccount) {
-    // action: "hold" = keep remaining in corp, "distribute" = take it all out
-    // taxAccount: "business" (bank auto-withholds 15%) or "personal" (no withholding) — only matters for "distribute"
-    const remaining = Math.max(0, monthGross - monthExpTotal);
-    const flyShare = monthGross > 0 ? monthFlyGross / monthGross : 0;
-    const flyGrossTaken = action === "distribute" ? monthGross * flyShare : monthExpTotal * flyShare;
-    const taxReserveAmt = (action === "distribute" && taxAccount === "business")
-      ? Math.round(remaining * taxReservePct / 100)
-      : 0;
-    setExpensePayouts(prev => [...prev, {
-      id: Date.now(),
-      date: new Date().toISOString(),
-      monthKey: viewKey,
-      expenseAmount: monthExpTotal,
-      grossAmount: monthGross,
-      remainingAmount: remaining,
-      flyGrossTaken: Math.round(flyGrossTaken),
-      action,
-      taxAccount: action === "distribute" ? taxAccount : null,
-      taxReserveAmt,
-    }]);
-    if (taxReserveAmt > 0) {
-      addReserveDeposit(taxReserveAmt, `Auto — Expense reimbursement distribution to business acct (${taxReservePct}% of ${fmt(remaining)})`);
-    }
-  }
-  function removeExpensePayout(id) { setExpensePayouts(prev => prev.filter(p => p.id !== id)); }
+  // Expenses reimbursed to personal (active, non-banked) reduce the payroll base directly in
+  // the Expenses card now, so the old all-or-nothing "skip payroll" expense payout flow was
+  // retired. expensePayouts is still read for any historical months that recorded one — its
+  // flyGrossTaken keeps reducing the cumulative flying balance so past data stays consistent.
   const monthExpensePayout = expensePayouts.find(p => p.monthKey === viewKey);
 
   // Month data
@@ -459,20 +437,30 @@ export default function App() {
   const monthSalesEntry = salesEntries.find(e => e.monthKey === viewKey);
   const monthSalesGross = (monthSalesEntry && monthSalesEntry.received !== false) ? monthSalesEntry.amount : 0;
   const salesCarriedPending = salesEntries.filter(e => e.received === false && e.monthKey < viewKey);
-
-  // "If you ran payroll right now" — computed from the money currently in the bank
-  // (flying balance + unconsumed sales, both net of the tax withheld at receipt).
-  // Shared by the preview in the PAYROLL RUN card and markPayrollRun, so the logged
-  // run always matches exactly what the preview showed.
-  const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
-  const runCombinedGross  = flyingBalance + runAvailableSales;
-  const runPayBase        = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
-  const runPreview        = calcPayroll(runPayBase, salaryPct);
   const monthExpenses = expenses.filter(e => e.monthKey === viewKey);
   const monthActiveExp = monthExpenses.filter(e => !e.banked);
   const monthBankedExp = monthExpenses.filter(e => e.banked);
   const monthExpTotal  = monthActiveExp.reduce((s, e) => s + e.amount, 0);
   const monthBankedTotal = monthBankedExp.reduce((s, e) => s + e.amount, 0);
+
+  // "If you ran payroll right now" — computed from the money currently in the bank
+  // (flying balance + unconsumed sales, both net of the tax withheld at receipt), then
+  // reduced by the tax-free expense reimbursement you're taking out. Only wage + owner
+  // distribution should come from what's left after you've pulled expenses back out, so
+  // the pay base subtracts them here just like the Monthly Breakdown does.
+  //
+  // Expenses already applied by earlier runs this month are excluded so a second run
+  // doesn't subtract them again, and if the separate skip-payroll expense payout was used
+  // this month the expenses are handled there instead — not netted again here.
+  const expenseUsedThisMonth = monthPayrollRuns.reduce((s, r) => s + (r.expenseReimbUsed || 0), 0);
+  const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
+  const runCombinedGross  = flyingBalance + runAvailableSales;
+  const runAfterTaxCash   = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
+  const runExpenseRemaining = monthExpensePayout ? 0 : Math.max(0, monthExpTotal - expenseUsedThisMonth);
+  const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
+  const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
+  const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
+  const runPreview        = calcPayroll(runPayBase, salaryPct);
 
   // YTD data
   const ytdFlyGross   = flyJobs.filter(j => j.monthKey.startsWith(String(viewYear)) && j.received !== false).reduce((s,j) => s+j.amount, 0);
@@ -525,7 +513,7 @@ export default function App() {
       ["Type","Date","Amount","Note","Category"],
       ...flyJobs.map(j => ["Flying Job", j.monthKey, j.amount, j.note || "", "Income"]),
       ...salesEntries.map(e => ["Sales Payout", e.monthKey, e.amount, e.note || "", "Income"]),
-      ...expenses.map(e => ["Expense", e.monthKey, e.amount, e.note || "", e.banked ? "Banked Expense" : "Expense"]),
+      ...expenses.map(e => ["Expense", e.monthKey, e.amount, e.note || "", e.banked ? "Held in Business" : "Reimbursed Personal"]),
       ...payrollRuns.map(r => ["Payroll Run", r.date ? r.date.slice(0,10) : r.monthKey, r.netCheck, `${r.type} | gross ${r.gross}${r.note ? " | " + r.note : ""}`, "Payroll"]),
       ...expensePayouts.map(p => ["Expense Payout", p.date ? p.date.slice(0,10) : p.monthKey, p.expenseAmount, `action: ${p.action} | remaining: ${p.remainingAmount}`, "Reimbursement"]),
     ];
@@ -827,8 +815,14 @@ export default function App() {
               </div>
               <Row label="Flying balance (received only)" value={fmt(flyingBalance)} accent="green" T={T} />
               <Row label={`This month's sales${salesUsedThisMonth > 0 ? ` (${fmt(salesUsedThisMonth)} already run)` : ""}`} value={fmt(runAvailableSales)} accent="purple" T={T} />
-              <Row label="Combined gross" value={fmt(runCombinedGross)} bold T={T} />
-              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount, no fresh deduction here.</div>
+              <Row label="Combined gross" value={fmt(runCombinedGross)} bold={runExpenseApplied === 0} T={T} />
+              {runExpenseApplied > 0 && (
+                <>
+                  <Row label="Expense reimbursement (tax-free, out)" value={`-${fmt(runExpenseApplied)}`} accent="blue" T={T} />
+                  <Row label="Gross into payroll" value={fmt(runGrossForPayroll)} bold accent="green" T={T} />
+                </>
+              )}
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount{runExpenseApplied > 0 ? ", after pulling your expense reimbursement back out tax-free" : ""}, no fresh deduction here.</div>
               <SectionLabel text="IF YOU RAN PAYROLL RIGHT NOW" T={T} />
               <Row label={`After-tax pay base`} value={fmt(runPayBase)} T={T} />
               <Row label={`Wages (${salaryPct}% of base)`} value={fmt(runPreview.wage)} sub T={T} />
@@ -838,7 +832,7 @@ export default function App() {
               {runCombinedGross > 0 ? (
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <input type="text" value={runNote} onChange={e => setRunNote(e.target.value)} placeholder="Run note (e.g. Gusto batch #5)" style={{ ...inputStyle, flex: 1 }} onKeyDown={e => e.key === "Enter" && markPayrollRun()} />
-                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(runCombinedGross)}</button>
+                  <button onClick={markPayrollRun} style={btnStyle(green)}>✓ MARK PAYROLL RUN · {fmt(runGrossForPayroll)}</button>
                 </div>
               ) : (
                 <div style={{ fontSize: 10, color: T.textDim, marginTop: 10 }}>
@@ -857,7 +851,7 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <div style={{ fontSize: 10, color: T.textDim, marginBottom: 12 }}>Logged before payroll runs — reduces taxable base</div>
+              <div style={{ fontSize: 10, color: T.textDim, marginBottom: 12 }}>Reimbursed to your personal account by default — pulls the money out tax-free and drops it from the payroll base. Switch any expense to “business” to keep that cash in the pool for payroll instead.</div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <input type="number" value={expInput} onChange={e => setExpInput(e.target.value)} placeholder="Amount ($)" style={{ ...inputStyle, flex: "1 1 120px" }} onKeyDown={e => e.key === "Enter" && addExpense()} />
                 <input type="text" value={expNote} onChange={e => setExpNote(e.target.value)} placeholder="Description (optional)" style={{ ...inputStyle, flex: "2 1 150px" }} onKeyDown={e => e.key === "Enter" && addExpense()} />
@@ -869,12 +863,14 @@ export default function App() {
                   <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}`, opacity: e.banked ? 0.55 : 1 }}>
                     <div>
                       <span style={{ fontSize: 12, color: T.textMuted }}>{e.note || "Expense"}</span>
-                      {e.banked && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>BANKED</span>}
+                      {e.banked
+                        ? <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>HELD IN BUSINESS</span>
+                        : <span style={{ fontSize: 10, color: blue, border: `1px solid ${blue}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>→ PERSONAL</span>}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, color: e.banked ? T.textDim : blue }}>{fmt(e.amount)}</span>
-                      <button onClick={() => toggleBanked(e.id)} title={e.banked ? "Apply to payroll" : "Bank it — exclude from payroll"} style={{ background: e.banked ? yellow + "22" : T.toggleBg, border: `1px solid ${e.banked ? yellow : T.cardBorder}`, borderRadius: 6, color: e.banked ? yellow : T.textDim, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                        {e.banked ? "APPLY" : "BANK"}
+                      <button onClick={() => toggleBanked(e.id)} title={e.banked ? "Reimburse to your personal account — pulls it out and reduces the payroll base" : "Hold in the business account — keeps this cash in the pool for payroll"} style={{ background: e.banked ? blue + "22" : yellow + "22", border: `1px solid ${e.banked ? blue : yellow}`, borderRadius: 6, color: e.banked ? blue : yellow, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                        {e.banked ? "→ PERSONAL" : "→ BUSINESS"}
                       </button>
                       <button onClick={() => removeExpense(e.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
                     </div>
@@ -884,102 +880,21 @@ export default function App() {
               {monthExpenses.length > 0 && (
                 <div style={{ paddingTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 12, color: T.textMuted }}>Applied to payroll</span>
+                    <span style={{ fontSize: 12, color: T.textMuted }}>Reimbursed to personal (out of payroll pool)</span>
                     <span style={{ fontSize: 13, fontWeight: 700, color: blue }}>{fmt(monthExpTotal)}</span>
                   </div>
                   {monthBankedTotal > 0 && (
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6, padding: "7px 10px", background: yellow + "15", borderRadius: 8, border: `1px solid ${yellow}44` }}>
                       <div>
-                        <span style={{ fontSize: 12, color: yellow, fontWeight: 700 }}>🏦 Banked: {fmt(monthBankedTotal)}</span>
-                        <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>excluded from payroll — apply when ready</div>
+                        <span style={{ fontSize: 12, color: yellow, fontWeight: 700 }}>🏦 Held in business: {fmt(monthBankedTotal)}</span>
+                        <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>kept in the pool for payroll — reimburse to personal when ready</div>
                       </div>
-                      <button onClick={applyBanked} style={{ background: yellow + "22", border: `1px solid ${yellow}`, borderRadius: 6, color: yellow, fontSize: 10, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>APPLY ALL</button>
+                      <button onClick={applyBanked} style={{ background: blue + "22", border: `1px solid ${blue}`, borderRadius: 6, color: blue, fontSize: 10, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>ALL → PERSONAL</button>
                     </div>
                   )}
                 </div>
               )}
             </Card>
-
-            {/* Expense Reimbursement — skip-payroll flow */}
-            {(monthExpTotal > 0 || monthBankedTotal > 0) && (
-              <Card accentColor={blue + "44"} T={T}>
-                <div style={{ fontSize: 11, color: blue, letterSpacing: "0.15em", marginBottom: 12 }}>💸 EXPENSE REIMBURSEMENT</div>
-
-                {!monthExpensePayout ? (
-                  <>
-                    <div style={{ fontSize: 12, color: T.textSub, lineHeight: 1.8, marginBottom: 14 }}>
-                      If your expenses cover most of the gross, you can skip payroll and just reimburse yourself the expenses tax-free.
-                    </div>
-
-                    {/* Math summary */}
-                    <div style={{ background: T.inputBg, borderRadius: 8, padding: "12px 14px", marginBottom: 14 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 12, color: T.textMuted }}>Total gross income</span>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{fmt(monthGross)}</span>
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                        <span style={{ fontSize: 12, color: T.textMuted }}>Expense reimbursement (tax-free)</span>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: blue }}>−{fmt(monthExpTotal)}</span>
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: `1px solid ${T.rowBorder}` }}>
-                        <span style={{ fontSize: 12, color: T.textMuted }}>Remaining in corp</span>
-                        <span style={{ fontSize: 13, fontWeight: 800, color: Math.max(0, monthGross - monthExpTotal) === 0 ? green : yellow }}>
-                          {fmt(Math.max(0, monthGross - monthExpTotal))}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div style={{ fontSize: 11, color: T.textDim, marginBottom: 12 }}>What do you want to do with the remaining {fmt(Math.max(0, monthGross - monthExpTotal))}?</div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <button onClick={() => logExpensePayout("hold")} style={{ ...btnStyle(blue), flex: 1 }}>
-                        🏦 HOLD IN CORP
-                      </button>
-                      <button onClick={() => logExpensePayout("distribute", "business")} style={{ ...btnStyle(purple), flex: 1 }}>
-                        💰 TAKE OUT → BUSINESS ACCT
-                      </button>
-                      <button onClick={() => logExpensePayout("distribute", "personal")} style={{ ...btnStyle(yellow), flex: 1 }}>
-                        💸 TAKE OUT → PERSONAL ACCT
-                      </button>
-                    </div>
-                    <div style={{ fontSize: 10, color: T.textDim, marginTop: 8, lineHeight: 1.5 }}>
-                      Hold: keep {fmt(Math.max(0, monthGross - monthExpTotal))} toward next payroll threshold.{"  "}
-                      Business acct: pulls the full {fmt(monthGross)} out and auto-reserves {taxReservePct}% of {fmt(Math.max(0, monthGross - monthExpTotal))} for taxes (bank withholds it).{"  "}
-                      Personal acct: pulls the full {fmt(monthGross)} out with no tax reserve set aside — you'll need to handle that yourself.
-                    </div>
-                  </>
-                ) : (
-                  <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                      <div>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: blue, marginBottom: 4 }}>
-                          {fmt(monthExpensePayout.expenseAmount)} reimbursed tax-free
-                        </div>
-                        <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 2 }}>
-                          {fmtDate(monthExpensePayout.date)}
-                        </div>
-                        {monthExpensePayout.action === "hold" ? (
-                          <div style={{ fontSize: 11, color: yellow }}>
-                            🏦 {fmt(monthExpensePayout.remainingAmount)} held in corp for next payroll
-                          </div>
-                        ) : (
-                          <>
-                            <div style={{ fontSize: 11, color: purple }}>
-                              {monthExpensePayout.taxAccount === "business" ? "💰" : "💸"} {fmt(monthExpensePayout.remainingAmount)} taken as distribution → {monthExpensePayout.taxAccount === "business" ? "business acct" : "personal acct"}
-                            </div>
-                            {monthExpensePayout.taxReserveAmt > 0 && (
-                              <div style={{ fontSize: 11, color: yellow, marginTop: 2 }}>
-                                🏦 +{fmt(monthExpensePayout.taxReserveAmt)} reserved to Tax Reserves Account
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                      <button onClick={() => removeExpensePayout(monthExpensePayout.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
-                    </div>
-                  </div>
-                )}
-              </Card>
-            )}
 
             {/* Monthly Breakdown */}
             <Card T={T}>
@@ -1020,7 +935,7 @@ export default function App() {
                       </span>
                       <span style={{ fontSize: 11, color: T.textDim, marginLeft: 10 }}>{fmtDate(r.date)}</span>
                       {r.flyGrossUsed != null && (
-                        <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>✈ {fmt(r.flyGrossUsed)} flying + 💼 {fmt(r.salesGrossUsed || 0)} sales</div>
+                        <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>✈ {fmt(r.flyGrossUsed)} flying + 💼 {fmt(r.salesGrossUsed || 0)} sales{r.expenseReimbUsed > 0 ? ` − 🧾 ${fmt(r.expenseReimbUsed)} expenses` : ""}</div>
                       )}
                       {r.note && <div style={{ fontSize: 10, color: T.textDim, marginTop: 2 }}>{r.note}</div>}
                     </div>
