@@ -361,6 +361,24 @@ export default function App() {
   }
   const flyBalancePct      = Math.min(100, (flyingBalance / PAYROLL_THRESHOLD) * 100);
 
+  // Which received flying jobs have already been run through payroll — derived from how much of
+  // the cumulative flying income the logged runs (and any historical expense payouts) have eaten,
+  // walked oldest-first. Payroll runs consume the whole available balance each time, so this
+  // normally lands cleanly on job boundaries. Purely derived — no persisted "used" flag to migrate.
+  const flyConsumedTotal = Math.max(0, totalFlyJobsGross - flyingBalance);
+  const consumedFlyJobIds = (() => {
+    const ids = new Set();
+    const received = flyJobs.filter(j => j.received !== false)
+      .slice()
+      .sort((a, b) => (a.receivedDate || "").localeCompare(b.receivedDate || "") || (a.id - b.id));
+    let acc = 0, past = false;
+    for (const j of received) {
+      if (!past && acc + j.amount <= flyConsumedTotal + 1) { ids.add(j.id); acc += j.amount; }
+      else { past = true; }
+    }
+    return ids;
+  })();
+
   // Reserve balance helpers
   const reserveBalance = reserveEvents.reduce((s, e) => s + e.amount, 0);
   function addReserveDeposit(amount, note) {
@@ -399,6 +417,7 @@ export default function App() {
       expenseReimbUsed: runExpenseApplied,
       taxReserve: 0, // reserved at receipt time for both streams, not at run time
       wage: runPreview.wage,
+      distribution: runPreview.afterPayroll,
       netCheck: runPreview.netCheck,
       erFICA: runPreview.erFICA,
       eeFICA: runPreview.eeFICA,
@@ -432,7 +451,12 @@ export default function App() {
   ];
   const monthFlyJobs = monthFlyJobsAll.filter(j => j.received !== false);
   const monthFlyJobsPending = monthFlyJobsAll.filter(j => j.received === false);
+  // Received jobs split by whether payroll has already consumed them
+  const monthFlyJobsOpen = monthFlyJobs.filter(j => !consumedFlyJobIds.has(j.id));
+  const monthFlyJobsRun  = monthFlyJobs.filter(j => consumedFlyJobIds.has(j.id));
   const monthFlyGross = monthFlyJobs.reduce((s, j) => s + j.amount, 0);
+  const monthFlyOpenGross = monthFlyJobsOpen.reduce((s, j) => s + j.amount, 0);
+  const monthFlyRunGross  = monthFlyJobsRun.reduce((s, j) => s + j.amount, 0);
   const monthFlyPendingGross = monthFlyJobsPending.reduce((s, j) => s + j.amount, 0);
   const monthSalesEntry = salesEntries.find(e => e.monthKey === viewKey);
   const monthSalesGross = (monthSalesEntry && monthSalesEntry.received !== false) ? monthSalesEntry.amount : 0;
@@ -450,13 +474,12 @@ export default function App() {
   // the pay base subtracts them here just like the Monthly Breakdown does.
   //
   // Expenses already applied by earlier runs this month are excluded so a second run
-  // doesn't subtract them again, and if the separate skip-payroll expense payout was used
-  // this month the expenses are handled there instead — not netted again here.
+  // doesn't subtract them again.
   const expenseUsedThisMonth = monthPayrollRuns.reduce((s, r) => s + (r.expenseReimbUsed || 0), 0);
   const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
   const runCombinedGross  = flyingBalance + runAvailableSales;
   const runAfterTaxCash   = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
-  const runExpenseRemaining = monthExpensePayout ? 0 : Math.max(0, monthExpTotal - expenseUsedThisMonth);
+  const runExpenseRemaining = Math.max(0, monthExpTotal - expenseUsedThisMonth);
   const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
   const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
   const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
@@ -468,17 +491,38 @@ export default function App() {
   const ytdExpenses   = expenses.filter(e => e.monthKey.startsWith(String(viewYear)) && !e.banked).reduce((s,e) => s+e.amount, 0);
   const ytdGross = ytdFlyGross + ytdSalesGross;
 
-  // Monthly calcs — order: gross → tax reserve → expenses → payroll (one combined run)
+  // Monthly calcs. Gross / tax reserve / expenses are factual month figures (income received,
+  // tax withheld at receipt, expenses reimbursed to personal). Payroll take-home is NOT a fresh
+  // recompute on the whole month's gross — doing that re-counts income already paid out in an
+  // earlier payroll run this month (the "almost double" bug). Instead paycheck + distribution
+  // reflect the ACTUAL logged runs, and income not yet run is surfaced separately as "available
+  // to run" (the same live preview the PAYROLL RUN card shows).
   const monthGross        = monthFlyGross + monthSalesGross;
   const taxFactor         = 1 - taxReservePct / 100;
   const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
   const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
   const monthNetProfit    = Math.max(0, monthAfterTax - monthExpTotal);
-  const monthPayrollBase  = monthNetProfit;
-  const monthP             = calcPayroll(monthPayrollBase, salaryPct);
-  const monthAfterPayroll = monthP.afterPayroll;
-  const monthDistribution = Math.max(0, monthAfterPayroll);
-  const monthNetPaycheck  = monthP.netCheck;
+
+  // Distribution for a logged run — stored on new runs, recomputed from stored fields for older ones.
+  const runDistribution = (r) => {
+    if (r.distribution != null) return r.distribution;
+    const base = Math.round((r.flyGrossUsed || 0) * taxFactor) + Math.round((r.salesGrossUsed || 0) * taxFactor) - (r.expenseReimbUsed || 0);
+    return Math.max(0, base - (r.wage || 0) - (r.erFICA || 0));
+  };
+  // Actual payroll already run this month (sum of the logged runs)
+  const monthRunGross     = monthPayrollRuns.reduce((s, r) => s + (r.gross || 0), 0);
+  const monthRunWage      = monthPayrollRuns.reduce((s, r) => s + (r.wage || 0), 0);
+  const monthRunErFICA    = monthPayrollRuns.reduce((s, r) => s + (r.erFICA || 0), 0);
+  const monthRunNet       = monthPayrollRuns.reduce((s, r) => s + (r.netCheck || 0), 0);
+  const monthRunDist      = monthPayrollRuns.reduce((s, r) => s + runDistribution(r), 0);
+  // Income received this month but not yet run — the live preview from the run card
+  const availGross        = runCombinedGross;
+  const availWage         = runCombinedGross > 0 ? runPreview.wage : 0;
+  const availNet          = runCombinedGross > 0 ? runPreview.netCheck : 0;
+  const availDist         = runCombinedGross > 0 ? runPreview.afterPayroll : 0;
+  // Take-home = what you've ACTUALLY paid yourself this month (from the logged runs)
+  const monthNetPaycheck  = monthRunNet;
+  const monthDistribution = monthRunDist;
   const monthTakeHome     = monthNetPaycheck + monthDistribution;
 
   // YTD calcs
@@ -600,30 +644,32 @@ export default function App() {
         <table>
           <thead><tr><th>EXPENSES</th><th></th></tr></thead>
           <tbody>
-            {monthExpenses.map(e => <tr key={e.id}><td>{e.note || "Expense"}</td><td>{fmt(e.amount)}</td></tr>)}
-            <tr><td>Total expenses (tax-free)</td><td>{fmt(monthExpTotal)}</td></tr>
-            <tr><td>Payroll base</td><td>{fmt(monthPayrollBase)}</td></tr>
+            {monthExpenses.map(e => <tr key={e.id}><td>{e.note || "Expense"}{e.banked ? " (held in business)" : ""}</td><td>{fmt(e.amount)}</td></tr>)}
+            <tr><td>Reimbursed to personal (out of payroll pool)</td><td>{fmt(monthExpTotal)}</td></tr>
           </tbody>
         </table>
         <table>
-          <thead><tr><th>PAYROLL</th><th></th></tr></thead>
+          <thead><tr><th>PAYROLL ALREADY RUN THIS MONTH</th><th></th></tr></thead>
           <tbody>
-            <tr><td>Wages ({salaryPct}% of payroll base)</td><td>{fmt(monthP.wage)}</td></tr>
-            <tr><td>Employer FICA</td><td>-{fmt(monthP.erFICA)}</td></tr>
-            <tr><td>Net paycheck</td><td>{fmt(monthP.netCheck)}</td></tr>
+            <tr><td>Wages ({salaryPct}% of pay base)</td><td>{fmt(monthRunWage)}</td></tr>
+            <tr><td>Employer FICA</td><td>-{fmt(monthRunErFICA)}</td></tr>
+            <tr><td>Net paycheck</td><td>{fmt(monthRunNet)}</td></tr>
+            <tr><td>Owner distribution</td><td>{fmt(monthRunDist)}</td></tr>
           </tbody>
         </table>
+        {availGross > 0 && (
+          <table>
+            <thead><tr><th>STILL AVAILABLE TO RUN</th><th></th></tr></thead>
+            <tbody>
+              <tr><td>Gross into payroll</td><td>{fmt(runGrossForPayroll)}</td></tr>
+              <tr><td>Would-be net paycheck</td><td>{fmt(availNet)}</td></tr>
+              <tr><td>Would-be distribution</td><td>{fmt(availDist)}</td></tr>
+            </tbody>
+          </table>
+        )}
         <table>
-          <thead><tr><th>TAX RESERVE & DISTRIBUTION</th><th></th></tr></thead>
           <tbody>
-            <tr><td>Tax reserve ({taxReservePct}% auto-deducted)</td><td>-{fmt(monthTaxReserve)}</td></tr>
-            <tr><td>After payroll costs</td><td>{fmt(monthAfterPayroll)}</td></tr>
-            <tr><td>Owner distribution</td><td>{fmt(monthDistribution)}</td></tr>
-          </tbody>
-        </table>
-        <table>
-          <tbody>
-            <tr className="total-row"><td>TOTAL TO YOUR POCKET</td><td>{fmt(monthTakeHome + monthExpTotal)}</td></tr>
+            <tr className="total-row"><td>TOTAL TO YOUR POCKET (SO FAR)</td><td>{fmt(monthTakeHome + monthExpTotal)}</td></tr>
           </tbody>
         </table>
         {monthPayrollRuns.length > 0 && (
@@ -720,9 +766,14 @@ export default function App() {
                 <input type="text" value={flyNote} onChange={e => setFlyNote(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, flex: "2 1 150px" }} onKeyDown={e => e.key === "Enter" && addFlyJob()} />
                 <button onClick={addFlyJob} style={btnStyle(green)}>+ ADD</button>
               </div>
-              {monthFlyJobsAll.length === 0
-                ? <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "12px 0" }}>No flying jobs logged this month</div>
-                : monthFlyJobsAll.map(j => {
+              {(() => {
+                const active = [...monthFlyJobsOpen, ...monthFlyJobsPending];
+                if (active.length === 0) {
+                  return <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "12px 0" }}>
+                    {monthFlyJobsRun.length > 0 ? "All flying jobs this month have been run through payroll ↓" : "No flying jobs logged this month"}
+                  </div>;
+                }
+                return active.map(j => {
                   const isPending = j.received === false;
                   return (
                     <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}`, opacity: isPending ? 0.7 : 1 }}>
@@ -741,13 +792,13 @@ export default function App() {
                       </div>
                     </div>
                   );
-                })
-              }
-              {monthFlyJobsAll.length > 0 && (
+                });
+              })()}
+              {(monthFlyJobsOpen.length > 0 || monthFlyJobsPending.length > 0) && (
                 <div style={{ paddingTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 12, color: T.textMuted }}>{monthFlyJobs.length} received</span>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: green }}>{fmt(monthFlyGross)}</span>
+                    <span style={{ fontSize: 12, color: T.textMuted }}>{monthFlyJobsOpen.length} received, waiting for payroll</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: green }}>{fmt(monthFlyOpenGross)}</span>
                   </div>
                   {monthFlyJobsPending.length > 0 && (
                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
@@ -755,6 +806,24 @@ export default function App() {
                       <span style={{ fontSize: 13, fontWeight: 700, color: yellow }}>{fmt(monthFlyPendingGross)}</span>
                     </div>
                   )}
+                </div>
+              )}
+              {monthFlyJobsRun.length > 0 && (
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.cardBorder}` }}>
+                  <div style={{ fontSize: 10, color: T.textDim, letterSpacing: "0.12em", marginBottom: 6 }}>✓ ALREADY RUN THROUGH PAYROLL</div>
+                  {monthFlyJobsRun.map(j => (
+                    <div key={j.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", opacity: 0.65 }}>
+                      <span style={{ fontSize: 12, color: T.textMuted }}>{j.note || "Flying job"}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ fontSize: 12, color: T.textDim, textDecoration: "line-through" }}>{fmt(j.amount)}</span>
+                        <button onClick={() => removeFlyJob(j.id)} style={{ background: "none", border: "none", color: A.red, cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+                    <span style={{ fontSize: 11, color: T.textDim }}>{monthFlyJobsRun.length} run this month</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: T.textDim }}>{fmt(monthFlyRunGross)}</span>
+                  </div>
                 </div>
               )}
             </Card>
@@ -785,15 +854,18 @@ export default function App() {
                 {monthSalesEntry && <button onClick={() => setSalesEntries(prev => prev.filter(e => e.monthKey !== viewKey))} style={btnStyle(A.red)}>RESET</button>}
               </div>
               <input type="text" value={salesNoteInput} onChange={e => setSalesNoteInput(e.target.value)} placeholder="Note (optional)" style={{ ...inputStyle, marginBottom: 4 }} onKeyDown={e => e.key === "Enter" && addSales()} />
-              {monthSalesEntry && (
-                <div style={{ padding: "8px 0" }}>
+              {monthSalesEntry && (() => {
+                const salesRan = monthSalesEntry.received !== false && salesUsedThisMonth >= monthSalesEntry.amount;
+                return (
+                <div style={{ padding: "8px 0", opacity: salesRan ? 0.6 : 1 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <div>
                       <span style={{ fontSize: 12, color: T.textMuted }}>{monthSalesEntry.note || "Monthly sales payout"}</span>
                       {monthSalesEntry.received === false && <span style={{ fontSize: 10, color: yellow, border: `1px solid ${yellow}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>INVOICED — NOT RECEIVED</span>}
+                      {salesRan && <span style={{ fontSize: 10, color: T.textDim, border: `1px solid ${T.cardBorder}`, borderRadius: 4, padding: "1px 5px", marginLeft: 7, letterSpacing: "0.08em" }}>✓ RUN THROUGH PAYROLL</span>}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: monthSalesEntry.received === false ? T.textDim : purple }}>{fmt(monthSalesEntry.amount)}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: (monthSalesEntry.received === false || salesRan) ? T.textDim : purple, textDecoration: salesRan ? "line-through" : "none" }}>{fmt(monthSalesEntry.amount)}</span>
                       {monthSalesEntry.received === false && (
                         <button onClick={() => markSalesReceived(monthSalesEntry.id)} title="Mark as received in business account — auto-reserves tax" style={{ background: purple + "22", border: `1px solid ${purple}`, borderRadius: 6, color: purple, fontSize: 10, padding: "2px 7px", cursor: "pointer", whiteSpace: "nowrap" }}>
                           ✓ RECEIVED
@@ -802,7 +874,8 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              )}
+                );
+              })()}
             </Card>
 
             {/* Unified Payroll Run */}
@@ -906,21 +979,30 @@ export default function App() {
               <SectionLabel text={`STEP 2 — TAX RESERVE (${taxReservePct}% AUTO-DEDUCTED FIRST)`} T={T} />
               <Row label={`Tax reserve (${taxReservePct}% → reserves account)`} value={`-${fmt(monthTaxReserve)}`} accent="yellow" bold T={T} />
               <Row label="After tax reserve" value={fmt(monthAfterTax)} bold T={T} />
-              <SectionLabel text="STEP 3 — EXPENSES (TAX-FREE TO YOUR POCKET)" T={T} />
+              <SectionLabel text="STEP 3 — EXPENSES (REIMBURSED TO PERSONAL)" T={T} />
               <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
-              <Row label="Payroll base" value={fmt(monthPayrollBase)} bold accent="yellow" T={T} />
-              <SectionLabel text={`STEP 4 — PAYROLL (${salaryPct}% OF PAYROLL BASE, ONE COMBINED RUN)`} T={T} />
-              <Row label="Wages" value={fmt(monthP.wage)} sub T={T} />
-              <Row label="Employer FICA" value={`-${fmt(monthP.erFICA)}`} sub accent="red" T={T} />
-              <SectionLabel text="YOUR PAYCHECK (AFTER WITHHOLDING)" T={T} />
-              <Row label="Net paycheck" value={fmt(monthNetPaycheck)} bold accent="green" T={T} />
-              <SectionLabel text="STEP 5 — DISTRIBUTION" T={T} />
-              <Row label="After all payroll costs" value={fmt(monthAfterPayroll)} T={T} />
-              <Row label="Owner distribution" value={fmt(monthDistribution)} bold accent="purple" T={T} />
-              <SectionLabel text="TOTAL TO YOUR POCKET" T={T} />
+              <SectionLabel text={`STEP 4 — PAYROLL ALREADY RUN THIS MONTH${monthPayrollRuns.length ? ` (${monthPayrollRuns.length} run${monthPayrollRuns.length > 1 ? "s" : ""})` : ""}`} T={T} />
+              {monthPayrollRuns.length === 0
+                ? <Row label="No payroll run yet this month" value="—" T={T} />
+                : <>
+                    <Row label="Wages" value={fmt(monthRunWage)} sub T={T} />
+                    <Row label="Employer FICA" value={`-${fmt(monthRunErFICA)}`} sub accent="red" T={T} />
+                    <Row label="Net paycheck" value={fmt(monthRunNet)} bold accent="green" T={T} />
+                    <Row label="Owner distribution" value={fmt(monthRunDist)} bold accent="purple" T={T} />
+                  </>}
+              {availGross > 0 && (
+                <>
+                  <SectionLabel text="STILL AVAILABLE TO RUN NOW" T={T} />
+                  <Row label="Gross into payroll" value={fmt(runGrossForPayroll)} T={T} />
+                  <Row label="Would-be net paycheck" value={fmt(availNet)} accent="green" T={T} />
+                  <Row label="Would-be distribution" value={fmt(availDist)} accent="purple" T={T} />
+                </>
+              )}
+              <SectionLabel text="TOTAL TO YOUR POCKET (SO FAR)" T={T} />
               <Row label="Expenses (tax-free)" value={fmt(monthExpTotal)} accent="blue" T={T} />
-              <Row label="Net paycheck + distribution" value={fmt(monthTakeHome)} accent="green" T={T} />
-              <Row label="Grand total" value={fmt(monthTakeHome + monthExpTotal)} bold accent="green" T={T} />
+              <Row label="Net paycheck + distribution (run)" value={fmt(monthTakeHome)} accent="green" T={T} />
+              <Row label="Grand total taken so far" value={fmt(monthTakeHome + monthExpTotal)} bold accent="green" T={T} />
+              {availGross > 0 && <Row label="+ available if you run payroll now" value={fmt(availNet + availDist)} accent="yellow" T={T} />}
             </Card>
 
             {/* Payroll Run Log */}
@@ -1012,7 +1094,9 @@ export default function App() {
                 </div>
               </div>
               <div style={{ fontSize: 40, fontWeight: 800, color: green, fontFamily: "'Syne', sans-serif", lineHeight: 1, marginBottom: 4 }}>{fmt(monthTakeHome + monthExpTotal)}</div>
-              {monthExpTotal > 0 && <div style={{ fontSize: 12, color: blue, marginBottom: 12 }}>↳ includes {fmt(monthExpTotal)} tax-free expenses</div>}
+              <div style={{ fontSize: 11, color: T.textDim, marginBottom: 4 }}>actually paid out so far this month{monthPayrollRuns.length ? ` · ${monthPayrollRuns.length} payroll run${monthPayrollRuns.length > 1 ? "s" : ""}` : ""}</div>
+              {monthExpTotal > 0 && <div style={{ fontSize: 12, color: blue, marginBottom: 4 }}>↳ includes {fmt(monthExpTotal)} tax-free expenses</div>}
+              {availGross > 0 && <div style={{ fontSize: 12, color: yellow, marginBottom: 12 }}>↳ {fmt(availNet + availDist)} more available to run now</div>}
               <div style={{ display: "flex", gap: 0, borderRadius: 8, overflow: "hidden", marginBottom: 14, height: 6 }}>
                 {monthGross > 0 && <>
                   <div style={{ width: `${(monthExpTotal/monthGross)*100}%`, background: blue }} />
