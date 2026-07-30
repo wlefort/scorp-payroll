@@ -190,12 +190,26 @@ export default function App() {
   }
   function usePersist(key, fallback) {
     const [val, setVal] = useState(() => ls(key, fallback));
-    const set = v => { const next = typeof v === "function" ? v(val) : v; localStorage.setItem(key, JSON.stringify(next)); setVal(next); };
+    const set = v => {
+      const next = typeof v === "function" ? v(val) : v;
+      localStorage.setItem(key, JSON.stringify(next));
+      // Mark this key as locally edited unless we're applying the server's own payload
+      if (!applyingRemote.current) dirtyKeys.current.add(key);
+      setVal(next);
+    };
     return [val, set];
   }
 
   const [syncStatus, setSyncStatus] = useState("synced");
   const initialized = useRef(false);
+  // Anything the user edits before the initial server load lands is recorded here, so the
+  // load can't clobber it (typing an expense while the page is still fetching used to make
+  // the entry vanish a second later). Cleared per-key only by the user's own edits.
+  const dirtyKeys = useRef(new Set());
+  const applyingRemote = useRef(false);
+  const pendingSave = useRef(false);
+  const payloadRef = useRef(null);
+  const [pushNonce, setPushNonce] = useState(0);
 
   const [tab, setTab] = useState("monthly");
   const flySalaryPctLegacy   = ls("sp_flySalaryPct", null);
@@ -231,10 +245,13 @@ export default function App() {
       .then(r => r.json())
       .then(data => {
         if (data && typeof data === "object") {
-          if (data.flyJobs)        { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
-          if (data.salesEntries)   { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
-          if (data.expenses)       { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
-          if (data.payrollRuns)    {
+          // Never overwrite a field the user already edited while this request was in flight.
+          const fresh = k => !dirtyKeys.current.has(k);
+          applyingRemote.current = true;
+          if (data.flyJobs && fresh("sp_flyJobs"))           { setFlyJobs(data.flyJobs);               localStorage.setItem("sp_flyJobs", JSON.stringify(data.flyJobs)); }
+          if (data.salesEntries && fresh("sp_salesEntries")) { setSalesEntries(data.salesEntries);     localStorage.setItem("sp_salesEntries", JSON.stringify(data.salesEntries)); }
+          if (data.expenses && fresh("sp_expenses"))         { setExpenses(data.expenses);             localStorage.setItem("sp_expenses", JSON.stringify(data.expenses)); }
+          if (data.payrollRuns && fresh("sp_payrollRuns")) {
             // One-time cleanup: an earlier (reverted) version of this app permanently rewrote
             // flyGrossUsed on historical runs, shrinking it by the tax %, then persisted that
             // to the synced data. The code that did this is gone, but the mutated numbers are
@@ -252,34 +269,64 @@ export default function App() {
             setPayrollRuns(cleanedRuns);
             localStorage.setItem("sp_payrollRuns", JSON.stringify(cleanedRuns));
           }
-          if (data.expensePayouts) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
-          if (data.salaryPct      !== undefined) { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
-          if (data.taxReservePct  !== undefined) { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
-          if (data.healthPremium  !== undefined) { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
-          if (data.reserveEvents)                { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
-          if (data.flyBalanceAdjustment !== undefined) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
+          if (data.expensePayouts && fresh("sp_expensePayouts")) { setExpensePayouts(data.expensePayouts); localStorage.setItem("sp_expensePayouts", JSON.stringify(data.expensePayouts)); }
+          if (data.salaryPct      !== undefined && fresh("sp_salaryPct"))      { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
+          if (data.taxReservePct  !== undefined && fresh("sp_taxReservePct"))  { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
+          if (data.healthPremium  !== undefined && fresh("sp_healthPremium"))  { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
+          if (data.reserveEvents && fresh("sp_reserveEvents"))                 { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
+          if (data.flyBalanceAdjustment !== undefined && fresh("sp_flyBalanceAdjustment")) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
+          applyingRemote.current = false;
         }
         setSyncStatus("synced");
       })
       .catch(() => setSyncStatus("error"))
-      .finally(() => { initialized.current = true; });
+      .finally(() => {
+        applyingRemote.current = false;
+        initialized.current = true;
+        // Edits made while loading haven't been pushed yet — force a save so they reach the server
+        if (dirtyKeys.current.size > 0) setPushNonce(n => n + 1);
+      });
   }, []);
+
+  // Newest payload, kept in a ref so the page-hide flush below never sends a stale snapshot
+  payloadRef.current = { flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment };
 
   // Debounced save
   useEffect(() => {
     if (!initialized.current) return;
     setSyncStatus("pending");
+    pendingSave.current = true;
     const t = setTimeout(() => {
       fetch(SYNC_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment }),
+        body: JSON.stringify(payloadRef.current),
       })
-        .then(r => r.ok ? setSyncStatus("synced") : setSyncStatus("error"))
+        .then(r => { if (r.ok) { pendingSave.current = false; setSyncStatus("synced"); } else setSyncStatus("error"); })
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, healthPremium, reserveEvents, flyBalanceAdjustment, pushNonce]);
+
+  // Flush an unsaved change when the page is hidden or closed. Mobile browsers suspend timers
+  // on backgrounding, so without this a change made in the second before switching apps never
+  // reaches the server — and the next load would overwrite it with the older server copy.
+  useEffect(() => {
+    const flush = () => {
+      if (!initialized.current || !pendingSave.current) return;
+      try {
+        const blob = new Blob([JSON.stringify(payloadRef.current)], { type: "application/json" });
+        if (navigator.sendBeacon && navigator.sendBeacon(SYNC_URL, blob)) pendingSave.current = false;
+      } catch { /* best effort — the debounced POST is still the primary path */ }
+    };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   const [viewMonth, setViewMonth] = useState(currentMonth);
   const [viewYear, setViewYear] = useState(currentYear);
