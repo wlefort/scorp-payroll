@@ -514,19 +514,41 @@ export default function App() {
   const monthExpTotal  = monthActiveExp.reduce((s, e) => s + e.amount, 0);
   const monthBankedTotal = monthBankedExp.reduce((s, e) => s + e.amount, 0);
 
+  // Expense reimbursements carry forward until a payroll run actually absorbs them. An expense
+  // logged in July but never run through payroll still has to come out of the pool the next time
+  // payroll runs, so the deduction is driven by every unapplied expense up to and including the
+  // viewed month — not just the ones logged in it. Walked oldest-first against what earlier runs
+  // already absorbed, so a partially-consumed expense carries its remainder instead of vanishing.
+  const expenseAppliedToDate = payrollRuns
+    .filter(r => r.monthKey <= viewKey)
+    .reduce((s, r) => s + (r.expenseReimbUsed || 0), 0);
+  const activeExpensesToDate = expenses
+    .filter(e => !e.banked && e.monthKey <= viewKey)
+    .sort((a, b) => a.monthKey.localeCompare(b.monthKey) || (a.id - b.id));
+  const carriedOpenExpenses = [];
+  let openExpenseTotal = 0;
+  let expAbsorbed = expenseAppliedToDate;
+  for (const e of activeExpensesToDate) {
+    if (expAbsorbed >= e.amount) { expAbsorbed -= e.amount; continue; }
+    const openAmount = e.amount - expAbsorbed;
+    expAbsorbed = 0;
+    openExpenseTotal += openAmount;
+    if (e.monthKey < viewKey) carriedOpenExpenses.push({ ...e, openAmount });
+  }
+  const carriedOpenTotal = carriedOpenExpenses.reduce((s, e) => s + e.openAmount, 0);
+
   // "If you ran payroll right now" — computed from the money currently in the bank
   // (flying balance + unconsumed sales, both net of the tax withheld at receipt), then
   // reduced by the tax-free expense reimbursement you're taking out. Only wage + owner
   // distribution should come from what's left after you've pulled expenses back out, so
   // the pay base subtracts them here just like the Monthly Breakdown does.
   //
-  // Expenses already applied by earlier runs this month are excluded so a second run
-  // doesn't subtract them again.
-  const expenseUsedThisMonth = monthPayrollRuns.reduce((s, r) => s + (r.expenseReimbUsed || 0), 0);
+  // Expenses already absorbed by earlier runs are excluded (see the carry-forward walk above),
+  // so a second run doesn't subtract them again and an unused one from a past month still counts.
   const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
   const runCombinedGross  = flyingBalance + runAvailableSales;
   const runAfterTaxCash   = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
-  const runExpenseRemaining = Math.max(0, monthExpTotal - expenseUsedThisMonth);
+  const runExpenseRemaining = Math.max(0, openExpenseTotal);
   const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
   const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
   const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
@@ -938,7 +960,7 @@ export default function App() {
               <Row label="Combined gross" value={fmt(runCombinedGross)} bold={runExpenseApplied === 0} T={T} />
               {runExpenseApplied > 0 && (
                 <>
-                  <Row label="Expense reimbursement (tax-free, out)" value={`-${fmt(runExpenseApplied)}`} accent="blue" T={T} />
+                  <Row label={`Expense reimbursement (tax-free, out)${carriedOpenTotal > 0 ? ` · incl. ${fmt(carriedOpenTotal)} carried over` : ""}`} value={`-${fmt(runExpenseApplied)}`} accent="blue" T={T} />
                   <Row label="Gross into payroll" value={fmt(runGrossForPayroll)} bold accent="green" T={T} />
                 </>
               )}
@@ -997,6 +1019,18 @@ export default function App() {
                   </div>
                 ))
               }
+              {carriedOpenExpenses.length > 0 && (
+                <div style={{ marginTop: 12, padding: "9px 11px", background: blue + "12", borderRadius: 8, border: `1px solid ${blue}44` }}>
+                  <div style={{ fontSize: 11, color: blue, fontWeight: 700, marginBottom: 5 }}>↩ Carried from earlier months: {fmt(carriedOpenTotal)}</div>
+                  {carriedOpenExpenses.map(e => (
+                    <div key={e.id} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
+                      <span style={{ fontSize: 11, color: T.textMuted }}>{e.note || "Expense"} · {MONTHS[parseInt(e.monthKey.split("-")[1]) - 1]}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: blue }}>{fmt(e.openAmount)}</span>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 10, color: T.textDim, marginTop: 5 }}>Logged but never run through payroll — still comes out of the pool on your next run</div>
+                </div>
+              )}
               {monthExpenses.length > 0 && (
                 <div style={{ paddingTop: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
