@@ -453,6 +453,17 @@ export default function App() {
   // out of both streams to reflect the cash actually left in the account.
   function markPayrollRun() {
     if (runCombinedGross <= 0) return;
+    // Record exactly which expenses this run's reimbursement covers (oldest first) so they stop
+    // carrying forward. A run that couldn't cover an expense in full notes the partial amount,
+    // and only the remainder carries.
+    let toCover = runExpenseApplied;
+    const expenseIdsUsed = [];
+    let expensePartial = null;
+    for (const e of openExpenseList) {
+      if (toCover <= 0) break;
+      if (toCover >= e.openAmount) { expenseIdsUsed.push(e.id); toCover -= e.openAmount; }
+      else { expensePartial = { id: e.id, amount: toCover }; toCover = 0; }
+    }
     const run = {
       id: Date.now(),
       type: "combined",
@@ -462,6 +473,8 @@ export default function App() {
       flyGrossUsed: flyingBalance,
       salesGrossUsed: runAvailableSales,
       expenseReimbUsed: runExpenseApplied,
+      expenseIdsUsed,
+      expensePartial,
       taxReserve: 0, // reserved at receipt time for both streams, not at run time
       wage: runPreview.wage,
       distribution: runPreview.afterPayroll,
@@ -514,27 +527,40 @@ export default function App() {
   const monthExpTotal  = monthActiveExp.reduce((s, e) => s + e.amount, 0);
   const monthBankedTotal = monthBankedExp.reduce((s, e) => s + e.amount, 0);
 
-  // Expense reimbursements carry forward until a payroll run actually absorbs them. An expense
-  // logged in July but never run through payroll still has to come out of the pool the next time
-  // payroll runs, so the deduction is driven by every unapplied expense up to and including the
-  // viewed month — not just the ones logged in it. Walked oldest-first against what earlier runs
-  // already absorbed, so a partially-consumed expense carries its remainder instead of vanishing.
-  const expenseAppliedToDate = payrollRuns
-    .filter(r => r.monthKey <= viewKey)
-    .reduce((s, r) => s + (r.expenseReimbUsed || 0), 0);
-  const activeExpensesToDate = expenses
-    .filter(e => !e.banked && e.monthKey <= viewKey)
-    .sort((a, b) => a.monthKey.localeCompare(b.monthKey) || (a.id - b.id));
-  const carriedOpenExpenses = [];
-  let openExpenseTotal = 0;
-  let expAbsorbed = expenseAppliedToDate;
-  for (const e of activeExpensesToDate) {
-    if (expAbsorbed >= e.amount) { expAbsorbed -= e.amount; continue; }
-    const openAmount = e.amount - expAbsorbed;
-    expAbsorbed = 0;
-    openExpenseTotal += openAmount;
-    if (e.monthKey < viewKey) carriedOpenExpenses.push({ ...e, openAmount });
+  // Expense reimbursements carry forward until a payroll run absorbs them, so an expense logged
+  // in July but never run through payroll still comes out of the pool on the next run.
+  //
+  // Two guards keep that from resurrecting settled history. Runs record the exact expense ids
+  // they covered, so absorption is tracked per-expense rather than by netting amounts. And an
+  // expense only carries out of its own month if payroll never ran that month — if it did, the
+  // expense was settled then. That second rule matters most for runs logged before expense
+  // tracking existed: they carry no expense fields at all, so without it every historical
+  // expense would look unapplied and pile into one deduction that wipes out the pay base.
+  // Newest run per month that predates per-expense tracking. Expense ids are creation
+  // timestamps, so anything logged before such a run was settled by it; anything logged after
+  // it is still genuinely open.
+  const legacyRunAt = new Map();
+  for (const r of payrollRuns) {
+    if (r.expenseIdsUsed) continue;
+    const ts = Date.parse(r.date || "") || 0;
+    legacyRunAt.set(r.monthKey, Math.max(legacyRunAt.get(r.monthKey) || 0, ts));
   }
+  const usedExpenseIds = new Set();
+  const expensePartials = new Map();
+  for (const r of payrollRuns) {
+    (r.expenseIdsUsed || []).forEach(id => usedExpenseIds.add(id));
+    if (r.expensePartial && r.expensePartial.id != null) {
+      expensePartials.set(r.expensePartial.id, (expensePartials.get(r.expensePartial.id) || 0) + (r.expensePartial.amount || 0));
+    }
+  }
+  const openExpenseList = expenses
+    .filter(e => !e.banked && e.monthKey <= viewKey && !usedExpenseIds.has(e.id)
+              && !(legacyRunAt.has(e.monthKey) && e.id <= legacyRunAt.get(e.monthKey)))
+    .map(e => ({ ...e, openAmount: Math.max(0, e.amount - (expensePartials.get(e.id) || 0)) }))
+    .filter(e => e.openAmount > 0)
+    .sort((a, b) => a.monthKey.localeCompare(b.monthKey) || (a.id - b.id));
+  const openExpenseTotal = openExpenseList.reduce((s, e) => s + e.openAmount, 0);
+  const carriedOpenExpenses = openExpenseList.filter(e => e.monthKey < viewKey);
   const carriedOpenTotal = carriedOpenExpenses.reduce((s, e) => s + e.openAmount, 0);
 
   // "If you ran payroll right now" — computed from the money currently in the bank
@@ -1062,6 +1088,7 @@ export default function App() {
               <Row label="After tax reserve" value={fmt(monthAfterTax)} bold T={T} />
               <SectionLabel text="STEP 3 — EXPENSES (REIMBURSED TO PERSONAL)" T={T} />
               <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
+              {carriedOpenTotal > 0 && <Row label="Carried from earlier months (applies to next run)" value={fmt(carriedOpenTotal)} accent="blue" sub T={T} />}
               <SectionLabel text={`STEP 4 — PAYROLL ALREADY RUN THIS MONTH${monthPayrollRuns.length ? ` (${monthPayrollRuns.length} run${monthPayrollRuns.length > 1 ? "s" : ""})` : ""}`} T={T} />
               {monthPayrollRuns.length === 0
                 ? <Row label="No payroll run yet this month" value="—" T={T} />
