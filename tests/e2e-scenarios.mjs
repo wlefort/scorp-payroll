@@ -15,20 +15,20 @@ import { chromium } from "playwright";
 const APP_URL = process.env.APP_URL || "http://127.0.0.1:5199";
 
 const TAX = 15, SAL = 38;
-const ER_DEFAULT = 7.65;
-const calc = (base, erPct = ER_DEFAULT) => {
+const ER_DEFAULT = 7.65, FED_DEFAULT = 10, SC_DEFAULT = 5;
+const calc = (base, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT) => {
   const wage = Math.round(base * SAL / 100);
   const erFICA = Math.round(wage * (erPct / 100)), eeFICA = Math.round(wage * 0.0765);
-  const fedWH = Math.round(wage * 0.10), scWH = Math.round(wage * 0.05);
+  const fedWH = Math.round(wage * (fedPct / 100)), scWH = Math.round(wage * (scPct / 100));
   return { wage, erFICA, totalCharged: wage + erFICA, net: Math.max(0, wage - eeFICA - fedWH - scWH), dist: Math.max(0, base - (wage + erFICA)) };
 };
 // independent model of the run preview
-const expectRun = (flyBal, sales, openExp, erPct = ER_DEFAULT) => {
+const expectRun = (flyBal, sales, openExp, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT) => {
   const combined = flyBal + sales;
   const cash = Math.round(flyBal * (1 - TAX/100)) + Math.round(sales * (1 - TAX/100));
   const applied = Math.min(openExp, cash);
   const base = Math.max(0, cash - applied);
-  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base, erPct) };
+  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base, erPct, fedPct, scPct) };
 };
 
 let pass = 0, fail = 0; const failures = [];
@@ -98,8 +98,8 @@ const read = async p => {
     runsLogged: (t.match(/💵 Payroll run/g) || []).length,
   };
 };
-const assertRun = (label, r, flyBal, sales, openExp, erPct = ER_DEFAULT) => {
-  const e = expectRun(flyBal, sales, openExp, erPct);
+const assertRun = (label, r, flyBal, sales, openExp, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT) => {
+  const e = expectRun(flyBal, sales, openExp, erPct, fedPct, scPct);
   check(`${label} combined gross`, r.combined, e.combined);
   check(`${label} expense deducted`, r.applied, e.applied);
   check(`${label} gross into payroll`, r.gross, e.grossIntoPayroll);
@@ -294,6 +294,28 @@ check("employer tax added on top", r.erTax, 85);
 check("total debited from account", r.charged, 1062);
 check("wage + employer tax = charged", r.wage + r.erTax, r.charged);
 assertRun("employer 8.71%", r, 3025, 0, 0, 8.71);
+await p.close();
+
+// ───────────── REAL PAYROLL REPORT — every figure matched against Gusto ─────────────
+// Gusto off-cycle run: gross $977.00, employer taxes $85.10 (employer cost $1,062.10),
+// employee taxes $143.91 (fed $35.78, SS $60.57, Medicare $14.17, SC $33.39), net pay $833.09.
+console.log("\n=== REAL PAYSTUB: employer 8.71% / federal 3.66% / SC 3.42% ===");
+p = await open("2027-10-05T12:00:00Z");
+await p.evaluate(() => {
+  localStorage.clear();
+  localStorage.setItem("sp_taxReservePct","15"); localStorage.setItem("sp_salaryPct","38");
+  localStorage.setItem("sp_employerTaxPct","8.71");
+  localStorage.setItem("sp_fedWhPct","3.66");
+  localStorage.setItem("sp_scWhPct","3.42");
+  const d = new Date(), k = d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+  localStorage.setItem("sp_flyJobs", JSON.stringify([{id:1,amount:3025,note:"J",monthKey:k,received:true,taxReserved:454,receivedDate:d.toISOString()}]));
+});
+await p.reload(); await p.waitForTimeout(800);
+r = await read(p);
+check("gross wage matches Gusto", r.wage, 977);
+check("employer cost matches Gusto ($1,062.10)", r.charged, 1062);
+check("net paycheck matches Gusto ($833.09)", r.net, 833);
+assertRun("real paystub", r, 3025, 0, 0, 8.71, 3.66, 3.42);
 await p.close();
 
 console.log(`\n================  ${pass} passed, ${fail} failed  ================`);

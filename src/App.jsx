@@ -3,8 +3,11 @@ import { useState, useEffect, useRef } from "react";
 const SYNC_URL = "/api/sync";
 
 const FEDERAL_FICA = 0.0765;
-const FEDERAL_TAX_RATE = 0.10;
-const SC_TAX_RATE = 0.05;
+// Income-tax withholding is driven by your W-4, filing status and year-to-date pay, so a flat
+// percentage is only ever an approximation — these are starting points you can match to a real
+// paystub in Settings.
+const DEFAULT_FED_WH_PCT = 10;
+const DEFAULT_SC_WH_PCT = 5;
 const PAYROLL_THRESHOLD = 1500;
 const DEFAULT_TAX_RESERVE_PCT = 15;
 // Employer payroll tax is billed ON TOP of gross wages. Bare employer FICA is 7.65%, but the
@@ -67,14 +70,14 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function calcPayroll(gross, salaryPct, employerTaxPct = DEFAULT_EMPLOYER_TAX_PCT) {
+function calcPayroll(gross, salaryPct, employerTaxPct = DEFAULT_EMPLOYER_TAX_PCT, fedWhPct = DEFAULT_FED_WH_PCT, scWhPct = DEFAULT_SC_WH_PCT) {
   const wage = Math.round(gross * (salaryPct / 100));
   // Employer tax is added to the wage, not taken out of it: the payroll service debits
   // wage + erFICA, so the cost lands on the owner distribution and never on the paycheck.
   const erFICA = Math.round(wage * (employerTaxPct / 100));
   const eeFICA = Math.round(wage * FEDERAL_FICA); // employee side is a true 7.65%
-  const fedWH = Math.round(wage * FEDERAL_TAX_RATE);
-  const scWH = Math.round(wage * SC_TAX_RATE);
+  const fedWH = Math.round(wage * (fedWhPct / 100));
+  const scWH = Math.round(wage * (scWhPct / 100));
   const netCheck = Math.max(0, wage - eeFICA - fedWH - scWH);
   const totalCost = wage + erFICA;
   const afterPayroll = Math.max(0, gross - totalCost);
@@ -226,6 +229,8 @@ export default function App() {
   const [salaryPct, setSalaryPct] = usePersist("sp_salaryPct", salaryPctDefault);
   const [taxReservePct, setTaxReservePct] = usePersist("sp_taxReservePct", DEFAULT_TAX_RESERVE_PCT);
   const [employerTaxPct, setEmployerTaxPct] = usePersist("sp_employerTaxPct", DEFAULT_EMPLOYER_TAX_PCT);
+  const [fedWhPct, setFedWhPct] = usePersist("sp_fedWhPct", DEFAULT_FED_WH_PCT);
+  const [scWhPct, setScWhPct] = usePersist("sp_scWhPct", DEFAULT_SC_WH_PCT);
   const [flyJobs, setFlyJobs] = usePersist("sp_flyJobs", []);
   const [flyInput, setFlyInput] = useState("");
   const [flyNote, setFlyNote] = useState("");
@@ -245,9 +250,11 @@ export default function App() {
   const [reserveCorrectionInput, setReserveCorrectionInput] = useState("");
   const [reserveWithdrawInput, setReserveWithdrawInput] = useState("");
   const [reserveNoteInput, setReserveNoteInput] = useState("");
-  const [erGrossInput, setErGrossInput] = useState("");
-  const [erChargedInput, setErChargedInput] = useState("");
-  const [erDerivedNote, setErDerivedNote] = useState("");
+  const [psGross, setPsGross] = useState("");
+  const [psEmployer, setPsEmployer] = useState("");
+  const [psFed, setPsFed] = useState("");
+  const [psState, setPsState] = useState("");
+  const [psNote, setPsNote] = useState("");
 
   // Load from server on mount
   useEffect(() => {
@@ -283,6 +290,8 @@ export default function App() {
           if (data.salaryPct      !== undefined && fresh("sp_salaryPct"))      { setSalaryPct(data.salaryPct);           localStorage.setItem("sp_salaryPct", JSON.stringify(data.salaryPct)); }
           if (data.taxReservePct  !== undefined && fresh("sp_taxReservePct"))  { setTaxReservePct(data.taxReservePct);   localStorage.setItem("sp_taxReservePct", JSON.stringify(data.taxReservePct)); }
           if (data.employerTaxPct !== undefined && fresh("sp_employerTaxPct")) { setEmployerTaxPct(data.employerTaxPct); localStorage.setItem("sp_employerTaxPct", JSON.stringify(data.employerTaxPct)); }
+          if (data.fedWhPct       !== undefined && fresh("sp_fedWhPct"))       { setFedWhPct(data.fedWhPct);             localStorage.setItem("sp_fedWhPct", JSON.stringify(data.fedWhPct)); }
+          if (data.scWhPct        !== undefined && fresh("sp_scWhPct"))        { setScWhPct(data.scWhPct);               localStorage.setItem("sp_scWhPct", JSON.stringify(data.scWhPct)); }
           if (data.healthPremium  !== undefined && fresh("sp_healthPremium"))  { setHealthPremium(data.healthPremium);   localStorage.setItem("sp_healthPremium", JSON.stringify(data.healthPremium)); }
           if (data.reserveEvents && fresh("sp_reserveEvents"))                 { setReserveEvents(data.reserveEvents);   localStorage.setItem("sp_reserveEvents", JSON.stringify(data.reserveEvents)); }
           if (data.flyBalanceAdjustment !== undefined && fresh("sp_flyBalanceAdjustment")) { setFlyBalanceAdjustment(data.flyBalanceAdjustment); localStorage.setItem("sp_flyBalanceAdjustment", JSON.stringify(data.flyBalanceAdjustment)); }
@@ -300,7 +309,7 @@ export default function App() {
   }, []);
 
   // Newest payload, kept in a ref so the page-hide flush below never sends a stale snapshot
-  payloadRef.current = { flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, employerTaxPct, healthPremium, reserveEvents, flyBalanceAdjustment };
+  payloadRef.current = { flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, employerTaxPct, fedWhPct, scWhPct, healthPremium, reserveEvents, flyBalanceAdjustment };
 
   // Debounced save
   useEffect(() => {
@@ -317,7 +326,7 @@ export default function App() {
         .catch(() => setSyncStatus("error"));
     }, 1000);
     return () => clearTimeout(t);
-  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, employerTaxPct, healthPremium, reserveEvents, flyBalanceAdjustment, pushNonce]);
+  }, [flyJobs, salesEntries, expenses, payrollRuns, expensePayouts, salaryPct, taxReservePct, employerTaxPct, fedWhPct, scWhPct, healthPremium, reserveEvents, flyBalanceAdjustment, pushNonce]);
 
   // Flush an unsaved change when the page is hidden or closed. Mobile browsers suspend timers
   // on backgrounding, so without this a change made in the second before switching apps never
@@ -457,16 +466,20 @@ export default function App() {
   }
   function removeReserveEvent(id) { setReserveEvents(prev => prev.filter(e => e.id !== id)); }
 
-  // Back out the real employer tax rate from an actual payroll draw: you entered a gross wage
-  // and the service debited more than that — the difference over the wage is the rate.
-  function deriveEmployerRate() {
-    const gross = parseFloat(erGrossInput), charged = parseFloat(erChargedInput);
-    if (isNaN(gross) || isNaN(charged) || gross <= 0) { setErDerivedNote("Enter the gross wage and the total your service charged."); return; }
-    if (charged < gross) { setErDerivedNote("The total charged should be at least the gross wage."); return; }
-    const pct = Math.round(((charged - gross) / gross) * 10000) / 100;
-    setEmployerTaxPct(pct);
-    setErDerivedNote(`${fmt(charged - gross)} on top of ${fmt(gross)} — employer rate set to ${pct}%.`);
-    setErGrossInput(""); setErChargedInput("");
+  // Back the real rates out of an actual payroll report. Each figure is taken as a share of the
+  // gross wage on that same run — blank fields are left alone.
+  function matchPaystub() {
+    const gross = parseFloat(psGross);
+    if (isNaN(gross) || gross <= 0) { setPsNote("Enter the gross wage from the payroll report first."); return; }
+    const asPct = v => Math.round((v / gross) * 10000) / 100;
+    const done = [];
+    const er = parseFloat(psEmployer), fed = parseFloat(psFed), st = parseFloat(psState);
+    if (!isNaN(er) && er >= 0) { setEmployerTaxPct(asPct(er)); done.push(`employer ${asPct(er)}%`); }
+    if (!isNaN(fed) && fed >= 0) { setFedWhPct(asPct(fed)); done.push(`federal ${asPct(fed)}%`); }
+    if (!isNaN(st) && st >= 0) { setScWhPct(asPct(st)); done.push(`SC ${asPct(st)}%`); }
+    if (!done.length) { setPsNote("Fill in at least one tax amount to match."); return; }
+    setPsNote(`Matched against ${fmt(gross)} gross — ${done.join(" · ")}.`);
+    setPsGross(""); setPsEmployer(""); setPsFed(""); setPsState("");
   }
 
   // Payroll run log — one combined run covering flying balance + this month's sales.
@@ -601,7 +614,7 @@ export default function App() {
   const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
   const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
   const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
-  const runPreview        = calcPayroll(runPayBase, salaryPct, employerTaxPct);
+  const runPreview        = calcPayroll(runPayBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
 
   // YTD data
   const ytdFlyGross   = flyJobs.filter(j => j.monthKey.startsWith(String(viewYear)) && j.received !== false).reduce((s,j) => s+j.amount, 0);
@@ -648,7 +661,7 @@ export default function App() {
   const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
   const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
   const ytdPayrollBase  = Math.max(0, ytdAfterTax - ytdExpenses);
-  const ytdP            = calcPayroll(ytdPayrollBase, salaryPct, employerTaxPct);
+  const ytdP            = calcPayroll(ytdPayrollBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
   const ytdAfterPayroll = ytdP.afterPayroll;
   const ytdDistribution = Math.max(0, ytdAfterPayroll);
   const ytdNetPaycheck  = ytdP.netCheck;
@@ -1371,25 +1384,39 @@ export default function App() {
               <SliderRow label="TAX RESERVE RATE" value={taxReservePct} min={5} max={30} onChange={setTaxReservePct} color={yellow} hint="Deducted from gross before payroll — auto-deposited to reserves account" T={T} />
             </Card>
             <Card accentColor={A.red + "44"} T={T}>
-              <div style={{ fontSize: 11, color: A.red, letterSpacing: "0.15em", marginBottom: 8 }}>🏛️ EMPLOYER PAYROLL TAX</div>
-              <div style={{ fontSize: 10, color: T.textDim, marginBottom: 12, lineHeight: 1.6 }}>
-                Billed on top of every gross wage — your payroll service debits the wage plus this, and it comes out of your owner distribution. Employer FICA alone is 7.65%; add FUTA and state unemployment to match what actually leaves your account. Those two stop once their yearly wage bases are met, so late in the year your real rate drops back toward 7.65%.
+              <div style={{ fontSize: 11, color: A.red, letterSpacing: "0.15em", marginBottom: 8 }}>🏛️ PAYROLL TAX RATES</div>
+              <div style={{ fontSize: 10, color: T.textDim, marginBottom: 14, lineHeight: 1.6 }}>
+                Employer tax is billed <strong>on top of</strong> the gross wage and comes out of your owner distribution. Income-tax withholding comes <strong>out of</strong> the wage and sets your take-home. Withholding depends on your W-4 and year-to-date pay, so match these to a real payroll report rather than trusting the defaults.
               </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-                <span style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.12em" }}>RATE</span>
-                <input type="number" step="0.01" min="0" max="25" value={employerTaxPct} onChange={e => setEmployerTaxPct(Number(e.target.value))} style={{ ...inputStyle, width: 90 }} />
-                <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>%</span>
-                {Number(employerTaxPct) !== DEFAULT_EMPLOYER_TAX_PCT && (
-                  <button onClick={() => setEmployerTaxPct(DEFAULT_EMPLOYER_TAX_PCT)} style={{ background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 6, color: T.textDim, fontSize: 10, padding: "3px 9px", cursor: "pointer" }}>RESET TO 7.65</button>
-                )}
+              {[["Employer payroll tax", employerTaxPct, setEmployerTaxPct, DEFAULT_EMPLOYER_TAX_PCT, "FICA 7.65% + unemployment — added on top"],
+                ["Federal withholding",  fedWhPct,       setFedWhPct,       DEFAULT_FED_WH_PCT,       "Federal income tax withheld from the wage"],
+                ["SC withholding",       scWhPct,        setScWhPct,        DEFAULT_SC_WH_PCT,        "State income tax withheld from the wage"]].map(([label, val, setter, dflt, hint]) => (
+                <div key={label} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, color: T.textMuted, letterSpacing: "0.1em", flex: "1 1 130px" }}>{label.toUpperCase()}</span>
+                    <input type="number" step="0.01" min="0" max="60" value={val} onChange={e => setter(Number(e.target.value))} style={{ ...inputStyle, width: 86 }} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>%</span>
+                    {Number(val) !== dflt && (
+                      <button onClick={() => setter(dflt)} title={`Reset to ${dflt}%`} style={{ background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 6, color: T.textDim, fontSize: 10, padding: "3px 8px", cursor: "pointer" }}>RESET</button>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10, color: T.textDim, marginTop: 3 }}>{hint}</div>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: T.textDim, letterSpacing: "0.12em", margin: "14px 0 6px" }}>MATCH A REAL PAYROLL REPORT</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                <input type="number" value={psGross} onChange={e => setPsGross(e.target.value)} placeholder="Gross wage ($)" style={{ ...inputStyle, flex: "1 1 110px" }} />
+                <input type="number" value={psEmployer} onChange={e => setPsEmployer(e.target.value)} placeholder="Employer taxes ($)" style={{ ...inputStyle, flex: "1 1 110px" }} />
               </div>
-              <div style={{ fontSize: 10, color: T.textDim, letterSpacing: "0.12em", marginBottom: 6 }}>OR WORK IT OUT FROM A REAL PAYCHECK</div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <input type="number" value={erGrossInput} onChange={e => setErGrossInput(e.target.value)} placeholder="Gross wage ($)" style={{ ...inputStyle, flex: "1 1 110px" }} onKeyDown={e => e.key === "Enter" && deriveEmployerRate()} />
-                <input type="number" value={erChargedInput} onChange={e => setErChargedInput(e.target.value)} placeholder="Total charged ($)" style={{ ...inputStyle, flex: "1 1 110px" }} onKeyDown={e => e.key === "Enter" && deriveEmployerRate()} />
-                <button onClick={deriveEmployerRate} style={btnStyle(A.red)}>CALCULATE</button>
+                <input type="number" value={psFed} onChange={e => setPsFed(e.target.value)} placeholder="Federal income tax ($)" style={{ ...inputStyle, flex: "1 1 110px" }} />
+                <input type="number" value={psState} onChange={e => setPsState(e.target.value)} placeholder="State withholding ($)" style={{ ...inputStyle, flex: "1 1 110px" }} />
+                <button onClick={matchPaystub} style={btnStyle(A.red)}>MATCH</button>
               </div>
-              {erDerivedNote && <div style={{ fontSize: 11, color: A.red, marginTop: 8 }}>{erDerivedNote}</div>}
+              {psNote && <div style={{ fontSize: 11, color: A.red, marginTop: 8 }}>{psNote}</div>}
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 8, lineHeight: 1.5 }}>
+                Unemployment tax only applies to the first slice of wages each year, so your employer rate drops once that base is met. Federal withholding is progressive, so a flat percentage drifts as your pay changes — re-match it now and then.
+              </div>
             </Card>
             <Card accentColor={blue + "33"} T={T}>
               <div style={{ fontSize: 11, color: blue, letterSpacing: "0.15em", marginBottom: 12 }}>🏥 HEALTH INSURANCE PREMIUM</div>
