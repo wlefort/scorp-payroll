@@ -15,19 +15,20 @@ import { chromium } from "playwright";
 const APP_URL = process.env.APP_URL || "http://127.0.0.1:5199";
 
 const TAX = 15, SAL = 38;
-const calc = base => {
+const ER_DEFAULT = 7.65;
+const calc = (base, erPct = ER_DEFAULT) => {
   const wage = Math.round(base * SAL / 100);
-  const erFICA = Math.round(wage * 0.0765), eeFICA = Math.round(wage * 0.0765);
+  const erFICA = Math.round(wage * (erPct / 100)), eeFICA = Math.round(wage * 0.0765);
   const fedWH = Math.round(wage * 0.10), scWH = Math.round(wage * 0.05);
-  return { wage, net: Math.max(0, wage - eeFICA - fedWH - scWH), dist: Math.max(0, base - (wage + erFICA)) };
+  return { wage, erFICA, totalCharged: wage + erFICA, net: Math.max(0, wage - eeFICA - fedWH - scWH), dist: Math.max(0, base - (wage + erFICA)) };
 };
 // independent model of the run preview
-const expectRun = (flyBal, sales, openExp) => {
+const expectRun = (flyBal, sales, openExp, erPct = ER_DEFAULT) => {
   const combined = flyBal + sales;
   const cash = Math.round(flyBal * (1 - TAX/100)) + Math.round(sales * (1 - TAX/100));
   const applied = Math.min(openExp, cash);
   const base = Math.max(0, cash - applied);
-  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base) };
+  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base, erPct) };
 };
 
 let pass = 0, fail = 0; const failures = [];
@@ -86,7 +87,9 @@ const read = async p => {
     applied:  n(runCard, /Expense reimbursement \(tax-free, out\)[^\n]*\n-\$([\d,]+)/) ?? 0,
     gross:    n(runCard, /Gross into payroll\s*\$([\d,]+)/) ?? n(runCard, /Combined gross\s*\$([\d,]+)/),
     base:     n(runCard, /After-tax pay base\s*\$([\d,]+)/),
-    wage:     n(runCard, /Wages \(38% of base\)\s*\$([\d,]+)/),
+    wage:     n(runCard, /Gross wage \(38% of base\)\s*\$([\d,]+)/),
+    erTax:    n(runCard, /Employer payroll tax \([\d.]+% on top\)\s*\+\$([\d,]+)/) ?? 0,
+    charged:  n(runCard, /Total your payroll service will charge\s*\$([\d,]+)/),
     net:      n(runCard, /Net paycheck to you\s*\$([\d,]+)/),
     dist:     n(runCard, /Owner distribution to you\s*\$([\d,]+)/),
     brkNet:   n(brk, /Net paycheck\s*\$([\d,]+)/),
@@ -95,8 +98,8 @@ const read = async p => {
     runsLogged: (t.match(/💵 Payroll run/g) || []).length,
   };
 };
-const assertRun = (label, r, flyBal, sales, openExp) => {
-  const e = expectRun(flyBal, sales, openExp);
+const assertRun = (label, r, flyBal, sales, openExp, erPct = ER_DEFAULT) => {
+  const e = expectRun(flyBal, sales, openExp, erPct);
   check(`${label} combined gross`, r.combined, e.combined);
   check(`${label} expense deducted`, r.applied, e.applied);
   check(`${label} gross into payroll`, r.gross, e.grossIntoPayroll);
@@ -104,6 +107,8 @@ const assertRun = (label, r, flyBal, sales, openExp) => {
   check(`${label} wage`, r.wage, e.wage);
   check(`${label} net paycheck`, r.net, e.net);
   check(`${label} distribution`, r.dist, e.dist);
+  check(`${label} employer tax on top`, r.erTax, e.erFICA);
+  check(`${label} total charged to account`, r.charged, e.totalCharged);
 };
 
 // ───────────────────────── MONTH 1 ─────────────────────────
@@ -270,6 +275,25 @@ check("combined gross = flying 1000 + sales 500", r.combined, 1500);
 assertRun("sales+flying preview", r, 1000, 500, 200);
 await runPayroll(p); r = await read(p);
 check("balance cleared after combined run", r.balance, 0);
+await p.close();
+
+// ───────────────── EMPLOYER TAX RATE — charged on top of gross ─────────────────
+console.log("\n=== EMPLOYER TAX: 8.71% (FICA + FUTA + state unemployment) ===");
+p = await open("2027-09-05T12:00:00Z");
+await p.evaluate(() => {
+  localStorage.clear();   // fresh books: prior runs would otherwise net the new job to zero
+  localStorage.setItem("sp_taxReservePct","15"); localStorage.setItem("sp_salaryPct","38");
+  localStorage.setItem("sp_employerTaxPct", "8.71");
+  const d = new Date(), k = d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+  localStorage.setItem("sp_flyJobs", JSON.stringify([{id:1,amount:3025,note:"J",monthKey:k,received:true,taxReserved:454,receivedDate:d.toISOString()}]));
+});
+await p.reload(); await p.waitForTimeout(800);
+r = await read(p);
+check("gross wage to enter", r.wage, 977);
+check("employer tax added on top", r.erTax, 85);
+check("total debited from account", r.charged, 1062);
+check("wage + employer tax = charged", r.wage + r.erTax, r.charged);
+assertRun("employer 8.71%", r, 3025, 0, 0, 8.71);
 await p.close();
 
 console.log(`\n================  ${pass} passed, ${fail} failed  ================`);
