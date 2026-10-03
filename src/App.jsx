@@ -277,7 +277,9 @@ export default function App() {
             const effectiveTaxPct = data.taxReservePct !== undefined ? data.taxReservePct : taxReservePct;
             const cleanedRuns = data.payrollRuns.map(r => {
               if (!r._flyNetMigrated) return r;
-              const { _flyNetMigrated, usedFlyJobIds, ...rest } = r;
+              const rest = { ...r };
+              delete rest._flyNetMigrated;
+              delete rest.usedFlyJobIds;
               if (rest.flyGrossUsed != null && effectiveTaxPct < 100) {
                 rest.flyGrossUsed = Math.round(rest.flyGrossUsed / (1 - effectiveTaxPct / 100));
               }
@@ -641,14 +643,12 @@ export default function App() {
     return Math.max(0, base - (r.wage || 0) - (r.erFICA || 0));
   };
   // Actual payroll already run this month (sum of the logged runs)
-  const monthRunGross     = monthPayrollRuns.reduce((s, r) => s + (r.gross || 0), 0);
   const monthRunWage      = monthPayrollRuns.reduce((s, r) => s + (r.wage || 0), 0);
   const monthRunErFICA    = monthPayrollRuns.reduce((s, r) => s + (r.erFICA || 0), 0);
   const monthRunNet       = monthPayrollRuns.reduce((s, r) => s + (r.netCheck || 0), 0);
   const monthRunDist      = monthPayrollRuns.reduce((s, r) => s + runDistribution(r), 0);
   // Income received this month but not yet run — the live preview from the run card
   const availGross        = runCombinedGross;
-  const availWage         = runCombinedGross > 0 ? runPreview.wage : 0;
   const availNet          = runCombinedGross > 0 ? runPreview.netCheck : 0;
   const availDist         = runCombinedGross > 0 ? runPreview.afterPayroll : 0;
   // Take-home = what you've ACTUALLY paid yourself this month (from the logged runs)

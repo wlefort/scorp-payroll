@@ -9,10 +9,14 @@ S Corp payroll calculator — React 19 + Vite, deployed via Cloudflare Pages (wr
 - No UI library — all styles are inline JS objects
 
 ## Key constants (App.jsx)
-- `FEDERAL_FICA` = 6.75% employer FICA
-- `FEDERAL_TAX_RATE` = 10%
-- `SC_TAX_RATE` = 5% (South Carolina)
+- `FEDERAL_FICA` = 7.65% (employee-side FICA)
+- `DEFAULT_EMPLOYER_TAX_PCT` = 7.65% employer tax, billed on top of wages (editable in Settings)
+- `DEFAULT_FED_WH_PCT` = 10% / `DEFAULT_SC_WH_PCT` = 5% income-tax withholding (editable in Settings)
+- `DEFAULT_TAX_RESERVE_PCT` = 15%
 - `PAYROLL_THRESHOLD` = $1,500
+
+## Tests
+`tests/e2e-scenarios.mjs` — Playwright scenario suite (see file header; Playwright is not a dependency).
 
 ## Dev
 ```bash
