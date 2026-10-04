@@ -656,7 +656,6 @@ export default function App() {
   // YTD calcs
   const ytdNetProfit    = Math.max(0, ytdGross - ytdExpenses);
   const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
-  const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
   const ytdPayrollBase  = Math.round(Math.max(0, ytdGross - ytdExpenses) * (1 - taxReservePct / 100));
   const ytdP            = calcPayroll(ytdPayrollBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
   const ytdAfterPayroll = ytdP.afterPayroll;
