@@ -601,21 +601,19 @@ export default function App() {
   const carriedOpenExpenses = openExpenseList.filter(e => e.monthKey < viewKey);
   const carriedOpenTotal = carriedOpenExpenses.reduce((s, e) => s + e.openAmount, 0);
 
-  // "If you ran payroll right now" — computed from the money currently in the bank
-  // (flying balance + unconsumed sales, both net of the tax withheld at receipt), then
-  // reduced by the tax-free expense reimbursement you're taking out. Only wage + owner
-  // distribution should come from what's left after you've pulled expenses back out, so
-  // the pay base subtracts them here just like the Monthly Breakdown does.
+  // "If you ran payroll right now" — expenses are deductible and reimbursed tax-free, so they
+  // come out of the gross FIRST; the tax reserve percentage then applies only to what's left.
+  // (The reserve already deposited at receipt was 15% of the full gross, so the slice that
+  // belonged to the reimbursed expenses is released back into the pool.)
   //
   // Expenses already absorbed by earlier runs are excluded (see the carry-forward walk above),
   // so a second run doesn't subtract them again and an unused one from a past month still counts.
   const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
   const runCombinedGross  = flyingBalance + runAvailableSales;
-  const runAfterTaxCash   = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
   const runExpenseRemaining = Math.max(0, openExpenseTotal);
-  const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
+  const runExpenseApplied = Math.min(runExpenseRemaining, runCombinedGross);
   const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
-  const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
+  const runPayBase        = Math.round(runGrossForPayroll * (1 - taxReservePct / 100));
   const runPreview        = calcPayroll(runPayBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
 
   // YTD data
@@ -631,15 +629,14 @@ export default function App() {
   // reflect the ACTUAL logged runs, and income not yet run is surfaced separately as "available
   // to run" (the same live preview the PAYROLL RUN card shows).
   const monthGross        = monthFlyGross + monthSalesGross;
-  const taxFactor         = 1 - taxReservePct / 100;
   const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
   const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
-  const monthNetProfit    = Math.max(0, monthAfterTax - monthExpTotal);
+  const monthNetProfit    = Math.max(0, monthGross - monthExpTotal);
 
   // Distribution for a logged run — stored on new runs, recomputed from stored fields for older ones.
   const runDistribution = (r) => {
     if (r.distribution != null) return r.distribution;
-    const base = Math.round((r.flyGrossUsed || 0) * taxFactor) + Math.round((r.salesGrossUsed || 0) * taxFactor) - (r.expenseReimbUsed || 0);
+    const base = Math.round(Math.max(0, (r.flyGrossUsed || 0) + (r.salesGrossUsed || 0) - (r.expenseReimbUsed || 0)) * (1 - taxReservePct / 100));
     return Math.max(0, base - (r.wage || 0) - (r.erFICA || 0));
   };
   // Actual payroll already run this month (sum of the logged runs)
@@ -660,7 +657,7 @@ export default function App() {
   const ytdNetProfit    = Math.max(0, ytdGross - ytdExpenses);
   const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
   const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
-  const ytdPayrollBase  = Math.max(0, ytdAfterTax - ytdExpenses);
+  const ytdPayrollBase  = Math.round(Math.max(0, ytdGross - ytdExpenses) * (1 - taxReservePct / 100));
   const ytdP            = calcPayroll(ytdPayrollBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
   const ytdAfterPayroll = ytdP.afterPayroll;
   const ytdDistribution = Math.max(0, ytdAfterPayroll);
@@ -1026,7 +1023,7 @@ export default function App() {
                   <Row label="Gross into payroll" value={fmt(runGrossForPayroll)} bold accent="green" T={T} />
                 </>
               )}
-              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount{runExpenseApplied > 0 ? ", after pulling your expense reimbursement back out tax-free" : ""}, no fresh deduction here.</div>
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>Expenses come out first (deductible, tax-free to you), then the {taxReservePct}% tax reserve is taken from what's left — wages are computed on that after-tax amount.</div>
               <SectionLabel text="IF YOU RAN PAYROLL RIGHT NOW" T={T} />
               <Row label={`After-tax pay base`} value={fmt(runPayBase)} T={T} />
               <Row label={`Gross wage (${salaryPct}% of base)`} value={fmt(runPreview.wage)} sub T={T} />

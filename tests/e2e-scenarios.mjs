@@ -25,10 +25,10 @@ const calc = (base, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT
 // independent model of the run preview
 const expectRun = (flyBal, sales, openExp, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT) => {
   const combined = flyBal + sales;
-  const cash = Math.round(flyBal * (1 - TAX/100)) + Math.round(sales * (1 - TAX/100));
-  const applied = Math.min(openExp, cash);
-  const base = Math.max(0, cash - applied);
-  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base, erPct, fedPct, scPct) };
+  const applied = Math.min(openExp, combined);          // expenses come out before the tax reserve
+  const grossIntoPayroll = Math.max(0, combined - applied);
+  const base = Math.round(grossIntoPayroll * (1 - TAX/100));
+  return { combined, applied, grossIntoPayroll, base, ...calc(base, erPct, fedPct, scPct) };
 };
 
 let pass = 0, fail = 0; const failures = [];
@@ -244,19 +244,19 @@ p = await open("2027-06-05T12:00:00Z");
 await addExp(p, 900, "Big repair");
 await addFly(p, 300, "Small job");
 r = await read(p);
-// cash = round(300*.85) = 255 -> only 255 of the 900 can be absorbed
+// only the 300 of gross can absorb the 900 expense
 assertRun("partial preview", r, 300, 0, 900);
-check("only cash-limited amount deducted", r.applied, 255);
+check("only gross-limited amount deducted", r.applied, 300);
 check("pay base floored at 0", r.base, 0);
 await runPayroll(p); await p.close();
 
-console.log("\n=== PARTIAL carry: remaining 645 must carry to next month ===");
+console.log("\n=== PARTIAL carry: remaining 600 must carry to next month ===");
 p = await open("2027-07-05T12:00:00Z");
 r = await read(p);
-check("remainder carried (900-255)", r.carried, 645);
+check("remainder carried (900-300)", r.carried, 600);
 await addFly(p, 2000, "Jul job");
 r = await read(p);
-assertRun("partial remainder applied", r, 2000, 0, 645);
+assertRun("partial remainder applied", r, 2000, 0, 600);
 await runPayroll(p); r = await read(p);
 check("remainder fully cleared", r.carried, 0);
 await p.close();
