@@ -630,6 +630,8 @@ export default function App() {
   // to run" (the same live preview the PAYROLL RUN card shows).
   const monthGross        = monthFlyGross + monthSalesGross;
   const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
+  // Expenses are deductible, so the slice of the deposited reserve that matched them isn't needed
+  const monthReserveReleased = Math.round(Math.min(monthExpTotal, monthGross) * taxReservePct / 100);
   const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
   const monthNetProfit    = Math.max(0, monthGross - monthExpTotal);
 
@@ -766,6 +768,7 @@ export default function App() {
           <tbody>
             <tr><td>Tax reserve ({taxReservePct}% of gross)</td><td>-{fmt(monthTaxReserve)}</td></tr>
             <tr><td>After tax reserve</td><td>{fmt(monthAfterTax)}</td></tr>
+            {monthReserveReleased > 0 && <tr><td>Reserve released (expenses are deductible)</td><td>+{fmt(monthReserveReleased)}</td></tr>}
           </tbody>
         </table>
         <table>
@@ -1120,6 +1123,7 @@ export default function App() {
               <SectionLabel text={`STEP 2 — TAX RESERVE (${taxReservePct}% AUTO-DEDUCTED FIRST)`} T={T} />
               <Row label={`Tax reserve (${taxReservePct}% → reserves account)`} value={`-${fmt(monthTaxReserve)}`} accent="yellow" bold T={T} />
               <Row label="After tax reserve" value={fmt(monthAfterTax)} bold T={T} />
+              {monthReserveReleased > 0 && <Row label={`Reserve released — ${taxReservePct}% of expenses isn't owed (deductible)`} value={`+${fmt(monthReserveReleased)}`} accent="green" sub T={T} />}
               <SectionLabel text="STEP 3 — EXPENSES (REIMBURSED TO PERSONAL)" T={T} />
               <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
               {carriedOpenTotal > 0 && <Row label="Carried from earlier months (applies to next run)" value={fmt(carriedOpenTotal)} accent="blue" sub T={T} />}
