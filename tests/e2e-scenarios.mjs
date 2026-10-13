@@ -25,10 +25,10 @@ const calc = (base, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT
 // independent model of the run preview
 const expectRun = (flyBal, sales, openExp, erPct = ER_DEFAULT, fedPct = FED_DEFAULT, scPct = SC_DEFAULT) => {
   const combined = flyBal + sales;
-  const cash = Math.round(flyBal * (1 - TAX/100)) + Math.round(sales * (1 - TAX/100));
-  const applied = Math.min(openExp, cash);
-  const base = Math.max(0, cash - applied);
-  return { combined, applied, grossIntoPayroll: Math.max(0, combined - applied), base, ...calc(base, erPct, fedPct, scPct) };
+  const applied = Math.min(openExp, combined);                 // tax-free reimbursement off gross
+  const grossIntoPayroll = Math.max(0, combined - applied);
+  const base = Math.round(grossIntoPayroll * (1 - TAX/100));   // reserve on what's left
+  return { combined, applied, grossIntoPayroll, base, ...calc(base, erPct, fedPct, scPct) };
 };
 
 let pass = 0, fail = 0; const failures = [];
@@ -244,19 +244,19 @@ p = await open("2027-06-05T12:00:00Z");
 await addExp(p, 900, "Big repair");
 await addFly(p, 300, "Small job");
 r = await read(p);
-// cash = round(300*.85) = 255 -> only 255 of the 900 can be absorbed
+// only the $300 of gross that exists can be reimbursed out of the $900 expense
 assertRun("partial preview", r, 300, 0, 900);
-check("only cash-limited amount deducted", r.applied, 255);
+check("deduction capped at the gross available", r.applied, 300);
 check("pay base floored at 0", r.base, 0);
 await runPayroll(p); await p.close();
 
-console.log("\n=== PARTIAL carry: remaining 645 must carry to next month ===");
+console.log("\n=== PARTIAL carry: remaining 600 must carry to next month ===");
 p = await open("2027-07-05T12:00:00Z");
 r = await read(p);
-check("remainder carried (900-255)", r.carried, 645);
+check("remainder carried (900-300)", r.carried, 600);
 await addFly(p, 2000, "Jul job");
 r = await read(p);
-assertRun("partial remainder applied", r, 2000, 0, 645);
+assertRun("partial remainder applied", r, 2000, 0, 600);
 await runPayroll(p); r = await read(p);
 check("remainder fully cleared", r.carried, 0);
 await p.close();
@@ -316,6 +316,32 @@ check("gross wage matches Gusto", r.wage, 977);
 check("employer cost matches Gusto ($1,062.10)", r.charged, 1062);
 check("net paycheck matches Gusto ($833.09)", r.net, 833);
 assertRun("real paystub", r, 3025, 0, 0, 8.71, 3.66, 3.42);
+await p.close();
+
+// ───────── ORDERING: tax-free expenses come off gross BEFORE the reserve ─────────
+console.log("\n=== ORDERING: expenses out first, then the 15% reserve ===");
+p = await open("2027-11-05T12:00:00Z");
+await p.evaluate(() => {
+  localStorage.clear();
+  localStorage.setItem("sp_taxReservePct","15"); localStorage.setItem("sp_salaryPct","38");
+  const d = new Date(), k = d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+  localStorage.setItem("sp_flyJobs", JSON.stringify([{id:1,amount:2000,note:"J",monthKey:k,received:true,taxReserved:300,receivedDate:d.toISOString()}]));
+  localStorage.setItem("sp_expenses", JSON.stringify([{id:5,amount:500,note:"Fuel",monthKey:k,banked:false}]));
+  localStorage.setItem("sp_reserveEvents", JSON.stringify([{id:9,date:d.toISOString(),type:"deposit",amount:300,note:"15% of 2000"}]));
+});
+await p.reload(); await p.waitForTimeout(800);
+r = await read(p);
+// expenses off gross: 2000-500=1500, reserve 15% of 1500=225 -> base 1275 (old order gave 1200)
+check("pay base = reserve applied after expenses", r.base, 1275);
+check("base higher than old order by 15% of the expense", r.base - 1200, 75);
+assertRun("ordering", r, 2000, 0, 500);
+let bal = await p.evaluate(() => JSON.parse(localStorage.getItem("sp_reserveEvents")||"[]").reduce((a,e)=>a+e.amount,0));
+check("reserve before run", bal, 300);
+await runPayroll(p);
+bal = await p.evaluate(() => JSON.parse(localStorage.getItem("sp_reserveEvents")||"[]").reduce((a,e)=>a+e.amount,0));
+check("over-reserved tax released from reserves", bal, 225);
+const rel = await p.evaluate(() => JSON.parse(localStorage.getItem("sp_reserveEvents")||"[]").filter(e=>e.type==="release").map(e=>e.amount));
+check("one release of -75 logged", JSON.stringify(rel), JSON.stringify([-75]));
 await p.close();
 
 console.log(`\n================  ${pass} passed, ${fail} failed  ================`);

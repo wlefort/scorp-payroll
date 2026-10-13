@@ -522,9 +522,22 @@ export default function App() {
       note: runNote,
     };
     setPayrollRuns(prev => [...prev, run]);
+    if (runReserveRelease > 0) {
+      setReserveEvents(prev => [...prev, {
+        id: run.id + 1,
+        date: new Date().toISOString(),
+        type: "release",
+        amount: -runReserveRelease,
+        runId: run.id,
+        note: `Auto — ${taxReservePct}% over-reserved on ${fmt(runExpenseApplied)} of tax-free expense reimbursement`,
+      }]);
+    }
     setRunNote("");
   }
-  function removePayrollRun(id) { setPayrollRuns(prev => prev.filter(r => r.id !== id)); }
+  function removePayrollRun(id) {
+    setPayrollRuns(prev => prev.filter(r => r.id !== id));
+    setReserveEvents(prev => prev.filter(e => e.runId !== id));
+  }
 
   const monthPayrollRuns  = payrollRuns.filter(r => r.monthKey === viewKey);
   const runThisMonth      = monthPayrollRuns.length > 0;
@@ -609,11 +622,16 @@ export default function App() {
   // so a second run doesn't subtract them again and an unused one from a past month still counts.
   const runAvailableSales = Math.max(0, monthSalesGross - salesUsedThisMonth);
   const runCombinedGross  = flyingBalance + runAvailableSales;
-  const runAfterTaxCash   = Math.round(flyingBalance * (1 - taxReservePct / 100)) + Math.round(runAvailableSales * (1 - taxReservePct / 100));
+  // Expense reimbursements are tax-free, so they come off the gross BEFORE the tax reserve is
+  // figured — reserving on money that leaves tax-free over-reserves by the reserve % of every
+  // expense and understates the payroll base by the same amount.
   const runExpenseRemaining = Math.max(0, openExpenseTotal);
-  const runExpenseApplied = Math.min(runExpenseRemaining, runAfterTaxCash);
+  const runExpenseApplied = Math.min(runExpenseRemaining, runCombinedGross);
   const runGrossForPayroll = Math.max(0, runCombinedGross - runExpenseApplied);
-  const runPayBase        = Math.max(0, runAfterTaxCash - runExpenseApplied);
+  const runPayBase        = Math.round(runGrossForPayroll * (1 - taxReservePct / 100));
+  // The reserve was already taken on the full gross when each job landed, so the share sitting
+  // against the tax-free reimbursement has to come back out of the reserve account to fund this.
+  const runReserveRelease = Math.round(runExpenseApplied * taxReservePct / 100);
   const runPreview        = calcPayroll(runPayBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
 
   // YTD data
@@ -630,9 +648,9 @@ export default function App() {
   // to run" (the same live preview the PAYROLL RUN card shows).
   const monthGross        = monthFlyGross + monthSalesGross;
   const taxFactor         = 1 - taxReservePct / 100;
-  const monthTaxReserve   = Math.round(monthGross * taxReservePct / 100);
-  const monthAfterTax     = Math.max(0, monthGross - monthTaxReserve);
-  const monthNetProfit    = Math.max(0, monthAfterTax - monthExpTotal);
+  const monthAfterExpenses = Math.max(0, monthGross - monthExpTotal);
+  const monthTaxReserve   = Math.round(monthAfterExpenses * taxReservePct / 100);
+  const monthNetProfit    = Math.max(0, monthAfterExpenses - monthTaxReserve);
 
   // Distribution for a logged run — stored on new runs, recomputed from stored fields for older ones.
   const runDistribution = (r) => {
@@ -658,9 +676,9 @@ export default function App() {
 
   // YTD calcs
   const ytdNetProfit    = Math.max(0, ytdGross - ytdExpenses);
-  const ytdTaxReserve   = Math.round(ytdGross * taxReservePct / 100);
-  const ytdAfterTax     = Math.max(0, ytdGross - ytdTaxReserve);
-  const ytdPayrollBase  = Math.max(0, ytdAfterTax - ytdExpenses);
+  const ytdAfterExpenses = Math.max(0, ytdGross - ytdExpenses);
+  const ytdTaxReserve   = Math.round(ytdAfterExpenses * taxReservePct / 100);
+  const ytdPayrollBase  = Math.max(0, ytdAfterExpenses - ytdTaxReserve);
   const ytdP            = calcPayroll(ytdPayrollBase, salaryPct, employerTaxPct, fedWhPct, scWhPct);
   const ytdAfterPayroll = ytdP.afterPayroll;
   const ytdDistribution = Math.max(0, ytdAfterPayroll);
@@ -766,17 +784,18 @@ export default function App() {
           </tbody>
         </table>
         <table>
-          <thead><tr><th>TAX RESERVE</th><th></th></tr></thead>
+          <thead><tr><th>EXPENSES OUT FIRST (TAX-FREE)</th><th></th></tr></thead>
           <tbody>
-            <tr><td>Tax reserve ({taxReservePct}% of gross)</td><td>-{fmt(monthTaxReserve)}</td></tr>
-            <tr><td>After tax reserve</td><td>{fmt(monthAfterTax)}</td></tr>
+            {monthExpenses.map(e => <tr key={e.id}><td>{e.note || "Expense"}{e.banked ? " (held in business)" : ""}</td><td>{fmt(e.amount)}</td></tr>)}
+            <tr><td>Reimbursed to personal (out of payroll pool)</td><td>-{fmt(monthExpTotal)}</td></tr>
+            <tr><td>Taxable income after expenses</td><td>{fmt(monthAfterExpenses)}</td></tr>
           </tbody>
         </table>
         <table>
-          <thead><tr><th>EXPENSES</th><th></th></tr></thead>
+          <thead><tr><th>TAX RESERVE</th><th></th></tr></thead>
           <tbody>
-            {monthExpenses.map(e => <tr key={e.id}><td>{e.note || "Expense"}{e.banked ? " (held in business)" : ""}</td><td>{fmt(e.amount)}</td></tr>)}
-            <tr><td>Reimbursed to personal (out of payroll pool)</td><td>{fmt(monthExpTotal)}</td></tr>
+            <tr><td>Tax reserve ({taxReservePct}% of income after expenses)</td><td>-{fmt(monthTaxReserve)}</td></tr>
+            <tr><td>Payroll base</td><td>{fmt(monthNetProfit)}</td></tr>
           </tbody>
         </table>
         <table>
@@ -1026,7 +1045,7 @@ export default function App() {
                   <Row label="Gross into payroll" value={fmt(runGrossForPayroll)} bold accent="green" T={T} />
                 </>
               )}
-              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received — wages are computed on the after-tax amount{runExpenseApplied > 0 ? ", after pulling your expense reimbursement back out tax-free" : ""}, no fresh deduction here.</div>
+              <div style={{ fontSize: 10, color: T.textDim, marginTop: 4, marginBottom: 4 }}>The {taxReservePct}% tax reserve was already set aside when each flying job and sales payout was marked received, so there's no fresh deduction here.{runExpenseApplied > 0 ? ` Your expense reimbursement is tax-free, so it comes off the gross first and the ${taxReservePct}% applies only to the ${fmt(runGrossForPayroll)} left — the ${fmt(runReserveRelease)} over-reserved against it is released back from your reserves account when you log the run.` : ""}</div>
               <SectionLabel text="IF YOU RAN PAYROLL RIGHT NOW" T={T} />
               <Row label={`After-tax pay base`} value={fmt(runPayBase)} T={T} />
               <Row label={`Gross wage (${salaryPct}% of base)`} value={fmt(runPreview.wage)} sub T={T} />
@@ -1121,12 +1140,13 @@ export default function App() {
               <Row label="Flying gross" value={fmt(monthFlyGross)} accent="green" T={T} />
               <Row label="Sales gross" value={fmt(monthSalesGross)} accent="purple" T={T} />
               <Row label="Total gross" value={fmt(monthGross)} bold T={T} />
-              <SectionLabel text={`STEP 2 — TAX RESERVE (${taxReservePct}% AUTO-DEDUCTED FIRST)`} T={T} />
-              <Row label={`Tax reserve (${taxReservePct}% → reserves account)`} value={`-${fmt(monthTaxReserve)}`} accent="yellow" bold T={T} />
-              <Row label="After tax reserve" value={fmt(monthAfterTax)} bold T={T} />
-              <SectionLabel text="STEP 3 — EXPENSES (REIMBURSED TO PERSONAL)" T={T} />
-              <Row label="Expenses reimbursed to you" value={fmt(monthExpTotal)} accent="blue" bold T={T} />
+              <SectionLabel text="STEP 2 — EXPENSES OUT FIRST (TAX-FREE)" T={T} />
+              <Row label="Expenses reimbursed to you" value={`-${fmt(monthExpTotal)}`} accent="blue" bold T={T} />
               {carriedOpenTotal > 0 && <Row label="Carried from earlier months (applies to next run)" value={fmt(carriedOpenTotal)} accent="blue" sub T={T} />}
+              <Row label="Taxable income after expenses" value={fmt(monthAfterExpenses)} bold T={T} />
+              <SectionLabel text={`STEP 3 — TAX RESERVE (${taxReservePct}% OF WHAT'S LEFT)`} T={T} />
+              <Row label={`Tax reserve (${taxReservePct}% → reserves account)`} value={`-${fmt(monthTaxReserve)}`} accent="yellow" bold T={T} />
+              <Row label="Payroll base" value={fmt(monthNetProfit)} bold accent="green" T={T} />
               <SectionLabel text={`STEP 4 — PAYROLL ALREADY RUN THIS MONTH${monthPayrollRuns.length ? ` (${monthPayrollRuns.length} run${monthPayrollRuns.length > 1 ? "s" : ""})` : ""}`} T={T} />
               {monthPayrollRuns.length === 0
                 ? <Row label="No payroll run yet this month" value="—" T={T} />
@@ -1211,8 +1231,8 @@ export default function App() {
                 return monthEvents.length === 0
                   ? <div style={{ fontSize: 12, color: T.textDim, textAlign: "center", padding: "10px 0" }}>No reserve transactions this month</div>
                   : [...monthEvents].reverse().map(e => {
-                  const color = e.type === "withdrawal" ? A.red : e.type === "correction" ? blue : yellow;
-                  const label = e.type === "withdrawal" ? "WITHDRAW" : e.type === "correction" ? "CORRECTION" : "DEPOSIT";
+                  const color = e.type === "withdrawal" ? A.red : e.type === "correction" ? blue : e.type === "release" ? blue : yellow;
+                  const label = e.type === "withdrawal" ? "WITHDRAW" : e.type === "correction" ? "CORRECTION" : e.type === "release" ? "RELEASED" : "DEPOSIT";
                   return (
                     <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: `1px solid ${T.rowBorder}` }}>
                       <div>
