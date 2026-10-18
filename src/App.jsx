@@ -180,19 +180,22 @@ function getMonthKey(date) {
 }
 
 export default function App() {
-  const [dark, setDark] = useState(false);
+  // Theme is the user's explicit choice, remembered on this device. It deliberately does NOT
+  // follow the OS color scheme: the system can fire a scheme-change event when the app is
+  // minimised and resumed, which used to flip a light-mode app to dark behind the user's back.
+  const [dark, setDarkState] = useState(() => {
+    try { return localStorage.getItem("sp_theme") === "dark"; } catch { return false; }
+  });
+  const setDark = updater => setDarkState(prev => {
+    const next = typeof updater === "function" ? updater(prev) : updater;
+    try { localStorage.setItem("sp_theme", next ? "dark" : "light"); } catch { /* storage blocked — choice just won't persist */ }
+    return next;
+  });
   const T = dark ? DARK : LIGHT;
   const green  = dark ? A.greenL  : A.green;
   const yellow = dark ? A.yellowL : A.yellow;
   const purple = dark ? A.purpleL : A.purple;
   const blue   = dark ? A.blueL   : A.blue;
-
-  useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = e => setDark(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
 
   function ls(key, fallback) {
     try { const v = localStorage.getItem(key); return v !== null ? JSON.parse(v) : fallback; } catch { return fallback; }
